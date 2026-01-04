@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
+use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashSet;
 use tauri::State;
+use uuid::Uuid;
 
 use crate::path_utils::expand_tilde_path;
 use crate::DesktopRuntime;
@@ -22,14 +24,18 @@ pub struct RestartResult {
 /// Load settings from disk.
 #[tauri::command]
 pub async fn load_settings(state: State<'_, DesktopRuntime>) -> Result<SettingsLoadResult, String> {
-    let settings = state
+    let (settings, _) = state
         .settings()
-        .load()
+        .update_with(|mut settings| {
+            migrate_legacy_project_settings(&mut settings);
+            normalize_project_selection(&mut settings);
+            (settings, ())
+        })
         .await
         .map_err(|e| format!("Failed to load settings: {}", e))?;
 
     Ok(SettingsLoadResult {
-        settings,
+        settings: format_settings_response(&settings),
         source: "desktop".to_string(),
     })
 }
@@ -332,6 +338,92 @@ fn sanitize_settings_update(payload: &Value) -> Value {
     }
 
     result
+}
+
+fn migrate_legacy_project_settings(settings: &mut Value) {
+    if !settings.is_object() {
+        *settings = json!({});
+    }
+
+    let now = Utc::now().timestamp_millis();
+    let obj = settings.as_object_mut().unwrap();
+
+    let has_projects = obj
+        .get("projects")
+        .and_then(|value| value.as_array())
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false);
+
+    if has_projects {
+        return;
+    }
+
+    let last_directory = obj
+        .get("lastDirectory")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(expand_tilde_path);
+
+    let Some(mut last_directory) = last_directory else {
+        return;
+    };
+
+    if let Ok(canonicalized) = std::fs::canonicalize(&last_directory) {
+        last_directory = canonicalized;
+    }
+
+    let Ok(stats) = std::fs::metadata(&last_directory) else {
+        return;
+    };
+    if !stats.is_dir() {
+        return;
+    }
+
+    let normalized_path = last_directory.to_string_lossy().to_string();
+    if normalized_path.trim().is_empty() {
+        return;
+    }
+
+    let project_id = Uuid::new_v4().to_string();
+    let active_project_id = project_id.clone();
+    let project_path = normalized_path.clone();
+
+    let projects_value = obj.entry("projects").or_insert_with(|| json!([]));
+    *projects_value = json!([
+        {
+            "id": project_id,
+            "path": project_path,
+            "addedAt": now,
+            "lastOpenedAt": now
+        }
+    ]);
+
+    obj.insert("activeProjectId".to_string(), json!(active_project_id));
+
+    // Ensure approvedDirectories includes the migrated project root.
+    let approved_value = obj
+        .entry("approvedDirectories")
+        .or_insert_with(|| json!([]));
+    if !approved_value.is_array() {
+        *approved_value = json!([]);
+    }
+
+    if let Some(array) = approved_value.as_array_mut() {
+        array.push(json!(normalized_path.clone()));
+        array.retain(|entry| entry.as_str().is_some_and(|value| !value.trim().is_empty()));
+        let mut seen = HashSet::new();
+        array.retain(|entry| {
+            let Some(value) = entry.as_str() else {
+                return false;
+            };
+            if seen.contains(value) {
+                return false;
+            }
+            seen.insert(value.to_string());
+            true
+        });
+    }
 }
 
 fn normalize_project_selection(settings: &mut Value) {

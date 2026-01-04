@@ -2513,13 +2513,16 @@ impl SettingsStore {
             Err(err) => return Err(err.into()),
         };
 
+        let current_snapshot = current.clone();
         let (next, result) = f(current);
 
-        if let Some(parent) = self.path.parent() {
-            fs::create_dir_all(parent).await.ok();
+        if next != current_snapshot {
+            if let Some(parent) = self.path.parent() {
+                fs::create_dir_all(parent).await.ok();
+            }
+            let bytes = serde_json::to_vec_pretty(&next)?;
+            fs::write(&self.path, bytes).await?;
         }
-        let bytes = serde_json::to_vec_pretty(&next)?;
-        fs::write(&self.path, bytes).await?;
 
         Ok((next, result))
     }

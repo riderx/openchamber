@@ -366,7 +366,7 @@ const resolveProjectDirectory = async (req) => {
     return { directory: validated.directory, error: null };
   }
 
-  const settings = await readSettingsFromDisk();
+  const settings = await readSettingsFromDiskMigrated();
   const projects = sanitizeProjects(settings.projects) || [];
   if (projects.length === 0) {
     return { directory: null, error: 'Directory parameter or active project is required' };
@@ -692,6 +692,76 @@ const validateProjectEntries = async (projects) => {
   }
 
   return results;
+};
+
+const migrateSettingsFromLegacyLastDirectory = async (current) => {
+  const settings = current && typeof current === 'object' ? current : {};
+  const now = Date.now();
+
+  const sanitizedProjects = sanitizeProjects(settings.projects) || [];
+  let nextProjects = sanitizedProjects;
+  let nextActiveProjectId =
+    typeof settings.activeProjectId === 'string' ? settings.activeProjectId : undefined;
+
+  let changed = false;
+
+  if (nextProjects.length === 0) {
+    const legacy = typeof settings.lastDirectory === 'string' ? settings.lastDirectory.trim() : '';
+    const candidate = legacy ? resolveDirectoryCandidate(legacy) : null;
+
+    if (candidate) {
+      try {
+        const stats = await fsPromises.stat(candidate);
+        if (stats.isDirectory()) {
+          const id = crypto.randomUUID();
+          nextProjects = [
+            {
+              id,
+              path: candidate,
+              addedAt: now,
+              lastOpenedAt: now,
+            },
+          ];
+          nextActiveProjectId = id;
+          changed = true;
+        }
+      } catch {
+        // ignore invalid lastDirectory
+      }
+    }
+  }
+
+  if (nextProjects.length > 0) {
+    const active = nextProjects.find((project) => project.id === nextActiveProjectId) || null;
+    if (!active) {
+      nextActiveProjectId = nextProjects[0].id;
+      changed = true;
+    }
+  } else if (nextActiveProjectId) {
+    nextActiveProjectId = undefined;
+    changed = true;
+  }
+
+  if (!changed) {
+    return { settings, changed: false };
+  }
+
+  const merged = mergePersistedSettings(settings, {
+    ...settings,
+    projects: nextProjects,
+    ...(nextActiveProjectId ? { activeProjectId: nextActiveProjectId } : { activeProjectId: undefined }),
+  });
+
+  return { settings: merged, changed: true };
+};
+
+const readSettingsFromDiskMigrated = async () => {
+  const current = await readSettingsFromDisk();
+  const { settings, changed } = await migrateSettingsFromLegacyLastDirectory(current);
+  if (changed) {
+    await writeSettingsToDisk(settings);
+  }
+  return settings;
 };
 
 const persistSettings = async (changes) => {
@@ -2511,7 +2581,7 @@ async function main(options = {}) {
 
   app.get('/api/config/settings', async (_req, res) => {
     try {
-      const settings = await readSettingsFromDisk();
+      const settings = await readSettingsFromDiskMigrated();
       res.json(formatSettingsResponse(settings));
     } catch (error) {
       console.error('Failed to load settings:', error);
