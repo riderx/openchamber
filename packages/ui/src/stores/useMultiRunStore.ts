@@ -60,7 +60,22 @@ const resolveProjectDirectory = (): string | null => {
     return activeProjectPath;
   }
 
-  return useDirectoryStore.getState().currentDirectory ?? null;
+  const currentDirectory = useDirectoryStore.getState().currentDirectory ?? null;
+  if (!currentDirectory) {
+    return null;
+  }
+
+  const normalized = currentDirectory.replace(/\\/g, '/').replace(/\/+$/, '') || currentDirectory;
+  const marker = '/.openchamber/';
+  const markerIndex = normalized.indexOf(marker);
+  if (markerIndex > 0) {
+    return normalized.slice(0, markerIndex);
+  }
+  if (normalized.endsWith('/.openchamber')) {
+    return normalized.slice(0, normalized.length - '/.openchamber'.length);
+  }
+
+  return normalized;
 };
 
 interface MultiRunState {
