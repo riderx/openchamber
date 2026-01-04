@@ -15,9 +15,12 @@ import { useConfigStore } from "@/stores/useConfigStore";
 // Note: useDirectoryStore cannot be imported at top level to avoid circular dependency
 // useDirectoryStore -> useAgentsStore (for refreshAfterOpenCodeRestart)
 // useAgentsStore -> useDirectoryStore (for currentDirectory)
-// Instead we access it from the window object where it's exposed
 const getCurrentDirectory = (): string | null => {
-  // Try to get from window if store is already loaded
+  const opencodeDirectory = opencodeClient.getDirectory();
+  if (typeof opencodeDirectory === 'string' && opencodeDirectory.trim().length > 0) {
+    return opencodeDirectory;
+  }
+
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const store = (window as any).__zustand_directory_store__;
@@ -27,6 +30,7 @@ const getCurrentDirectory = (): string | null => {
   } catch {
     // ignore
   }
+
   return null;
 };
 
@@ -169,8 +173,16 @@ export const useAgentsStore = create<AgentsStore>()(
                     const response = await fetch(`/api/config/agents/${encodeURIComponent(agent.name)}${queryParams}`);
                     if (response.ok) {
                       const data = await response.json();
-                      // Handle web/desktop response formats; fall back to JSON scope if md scope missing
-                      const scope = data.scope ?? data.sources?.md?.scope ?? data.sources?.json?.scope;
+                      const sources = (data?.sources || null) as
+                        | { md?: { exists?: boolean; scope?: unknown }; json?: { exists?: boolean; scope?: unknown } }
+                        | null;
+
+                      const scope = (sources?.md?.exists ? sources.md.scope : undefined)
+                        ?? (sources?.json?.exists ? sources.json.scope : undefined)
+                        ?? data.scope
+                        ?? sources?.md?.scope
+                        ?? sources?.json?.scope;
+
                       return { ...agent, scope: scope as AgentScope | undefined };
                     }
                   } catch {

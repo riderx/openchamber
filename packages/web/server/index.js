@@ -2623,10 +2623,14 @@ async function main(options = {}) {
       }
       const sources = getAgentSources(agentName, directory);
 
+      const scope = sources.md.exists
+        ? sources.md.scope
+        : (sources.json.exists ? sources.json.scope : null);
+
       res.json({
         name: agentName,
         sources: sources,
-        scope: sources.md.scope,
+        scope,
         isBuiltIn: !sources.md.exists && !sources.json.exists
       });
     } catch (error) {
@@ -2728,10 +2732,14 @@ async function main(options = {}) {
       }
       const sources = getCommandSources(commandName, directory);
 
+      const scope = sources.md.exists
+        ? sources.md.scope
+        : (sources.json.exists ? sources.json.scope : null);
+
       res.json({
         name: commandName,
         sources: sources,
-        scope: sources.md.scope,
+        scope,
         isBuiltIn: !sources.md.exists && !sources.json.exists
       });
     } catch (error) {

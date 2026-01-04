@@ -630,11 +630,14 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
         const normalizedMethod = typeof method === 'string' && method.trim() ? method.trim().toUpperCase() : 'GET';
         if (normalizedMethod === 'GET') {
           const sources = getAgentSources(agentName, workingDirectory);
+          const scope = sources.md.exists
+            ? sources.md.scope
+            : (sources.json.exists ? sources.json.scope : null);
           return {
             id,
             type,
             success: true,
-            data: { name: agentName, sources, scope: sources.md.scope, isBuiltIn: !sources.md.exists && !sources.json.exists },
+            data: { name: agentName, sources, scope, isBuiltIn: !sources.md.exists && !sources.json.exists },
           };
         }
 
@@ -705,11 +708,14 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
         const normalizedMethod = typeof method === 'string' && method.trim() ? method.trim().toUpperCase() : 'GET';
         if (normalizedMethod === 'GET') {
           const sources = getCommandSources(commandName, workingDirectory);
+          const scope = sources.md.exists
+            ? sources.md.scope
+            : (sources.json.exists ? sources.json.scope : null);
           return {
             id,
             type,
             success: true,
-            data: { name: commandName, sources, scope: sources.md.scope, isBuiltIn: !sources.md.exists && !sources.json.exists },
+            data: { name: commandName, sources, scope, isBuiltIn: !sources.md.exists && !sources.json.exists },
           };
         }
 

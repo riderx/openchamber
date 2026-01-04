@@ -113,8 +113,16 @@ export const useCommandsStore = create<CommandsStore>()(
                     const response = await fetch(`/api/config/commands/${encodeURIComponent(cmd.name)}${queryParams}`);
                     if (response.ok) {
                       const data = await response.json();
-                      // Handle both web (data.scope) and desktop (data.sources.md.scope) response formats
-                      const scope = data.scope ?? data.sources?.md?.scope;
+                      const sources = (data?.sources || null) as
+                        | { md?: { exists?: boolean; scope?: unknown }; json?: { exists?: boolean; scope?: unknown } }
+                        | null;
+
+                      const scope = (sources?.md?.exists ? sources.md.scope : undefined)
+                        ?? (sources?.json?.exists ? sources.json.scope : undefined)
+                        ?? data.scope
+                        ?? sources?.md?.scope
+                        ?? sources?.json?.scope;
+
                       return { ...cmd, scope: scope as CommandScope | undefined };
                     }
                   } catch {

@@ -852,6 +852,7 @@ function getCommandSources(commandName, workingDirectory) {
   const jsonSource = getJsonEntrySource(layers, 'command', commandName);
   const jsonSection = jsonSource.section;
   const jsonPath = jsonSource.path || layers.paths.customPath || layers.paths.projectPath || layers.paths.userPath;
+  const jsonScope = jsonSource.path === layers.paths.projectPath ? COMMAND_SCOPE.PROJECT : COMMAND_SCOPE.USER;
 
   const sources = {
     md: {
@@ -863,6 +864,7 @@ function getCommandSources(commandName, workingDirectory) {
     json: {
       exists: jsonSource.exists,
       path: jsonPath,
+      scope: jsonSource.exists ? jsonScope : null,
       fields: []
     },
     // Additional info about both levels

@@ -541,10 +541,11 @@ export const getCommandSources = (commandName: string, workingDirectory?: string
   const jsonSource = getJsonEntrySource(layers, 'command', commandName);
   const commandSection = jsonSource.section as Record<string, unknown> | undefined;
   const jsonPath = jsonSource.path || layers.paths.customPath || layers.paths.projectPath || layers.paths.userPath;
+  const jsonScope = jsonSource.path === layers.paths.projectPath ? COMMAND_SCOPE.PROJECT : COMMAND_SCOPE.USER;
 
   const sources: ConfigSources = {
     md: { exists: mdExists, path: mdPath, scope: mdScope, fields: [] },
-    json: { exists: jsonSource.exists, path: jsonPath || CONFIG_FILE, fields: [] },
+    json: { exists: jsonSource.exists, path: jsonPath || CONFIG_FILE, scope: jsonSource.exists ? jsonScope : null, fields: [] },
     projectMd: { exists: projectExists, path: projectPath },
     userMd: { exists: userExists, path: userPath }
   };
