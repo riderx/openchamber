@@ -66,6 +66,7 @@ export const useSessionStore = create<SessionStore>()(
         (set, get) => ({
 
             sessions: [],
+            sessionsByDirectory: new Map(),
             currentSessionId: null,
             lastLoadedDirectory: null,
             messages: new Map(),
@@ -87,6 +88,7 @@ export const useSessionStore = create<SessionStore>()(
             webUICreatedSessions: new Set(),
             worktreeMetadata: new Map(),
             availableWorktrees: [],
+            availableWorktreesByProject: new Map(),
             currentAgentContext: new Map(),
             sessionContextUsage: new Map(),
             sessionAgentEditModes: new Map(),
@@ -431,6 +433,7 @@ export const useSessionStore = create<SessionStore>()(
                 respondToPermission: (sessionId: string, permissionId: string, response: PermissionResponse) => usePermissionStore.getState().respondToPermission(sessionId, permissionId, response),
                 clearError: () => useSessionManagementStore.getState().clearError(),
                 getSessionsByDirectory: (directory: string) => useSessionManagementStore.getState().getSessionsByDirectory(directory),
+                getDirectoryForSession: (sessionId: string) => useSessionManagementStore.getState().getDirectoryForSession(sessionId),
                 getLastMessageModel: (sessionId: string) => useMessageStore.getState().getLastMessageModel(sessionId),
                 getCurrentAgent: (sessionId: string) => useContextStore.getState().getCurrentAgent(sessionId),
                 syncMessages: (sessionId: string, messages: { info: Message; parts: Part[] }[]) => useMessageStore.getState().syncMessages(sessionId, messages),
@@ -507,6 +510,7 @@ export const useSessionStore = create<SessionStore>()(
                     return useContextStore.getState().pollForTokenUpdates(sessionId, messageId, messages, maxAttempts);
                 },
                 updateSession: (session: Session) => useSessionManagementStore.getState().updateSession(session),
+                removeSessionFromStore: (sessionId: string) => useSessionManagementStore.getState().removeSessionFromStore(sessionId),
 
                 revertToMessage: async (sessionId: string, messageId: string) => {
                     // Get the message text before reverting
@@ -559,7 +563,7 @@ export const useSessionStore = create<SessionStore>()(
                     const sessions = get().sessions;
                     const currentSession = sessions.find(s => s.id === sessionId);
 
-                    // Silent no-op like OpenCode CLI
+                    // No-op when there is nothing to undo/redo
                     if (userMessages.length === 0) {
                         return;
                     }
@@ -576,7 +580,7 @@ export const useSessionStore = create<SessionStore>()(
                         targetMessage = userMessages[userMessages.length - 1];
                     }
 
-                    // Silent no-op like OpenCode CLI
+                    // No-op when there is nothing to undo/redo
                     if (!targetMessage) {
                         return;
                     }
@@ -598,7 +602,7 @@ export const useSessionStore = create<SessionStore>()(
                     const currentSession = sessions.find(s => s.id === sessionId);
                     const revertToId = currentSession?.revert?.messageID;
 
-                    // Silent no-op like OpenCode CLI
+                    // No-op when there is nothing to undo/redo
                     if (!revertToId) {
                         return;
                     }
@@ -708,13 +712,15 @@ useSessionManagementStore.subscribe((state, prevState) => {
 
     if (
         state.sessions === prevState.sessions &&
+        state.sessionsByDirectory === prevState.sessionsByDirectory &&
         state.currentSessionId === prevState.currentSessionId &&
         state.lastLoadedDirectory === prevState.lastLoadedDirectory &&
         state.isLoading === prevState.isLoading &&
         state.error === prevState.error &&
         state.webUICreatedSessions === prevState.webUICreatedSessions &&
         state.worktreeMetadata === prevState.worktreeMetadata &&
-        state.availableWorktrees === prevState.availableWorktrees
+        state.availableWorktrees === prevState.availableWorktrees &&
+        state.availableWorktreesByProject === prevState.availableWorktreesByProject
     ) {
         return;
     }
@@ -723,6 +729,7 @@ useSessionManagementStore.subscribe((state, prevState) => {
 
     useSessionStore.setState({
         sessions: state.sessions,
+        sessionsByDirectory: state.sessionsByDirectory,
         currentSessionId: draftOpen ? null : state.currentSessionId,
         lastLoadedDirectory: state.lastLoadedDirectory,
         isLoading: state.isLoading,
@@ -730,6 +737,7 @@ useSessionManagementStore.subscribe((state, prevState) => {
         webUICreatedSessions: state.webUICreatedSessions,
         worktreeMetadata: state.worktreeMetadata,
         availableWorktrees: state.availableWorktrees,
+        availableWorktreesByProject: state.availableWorktreesByProject,
     });
 });
 
@@ -873,6 +881,7 @@ useSessionStore.setState({
     webUICreatedSessions: useSessionManagementStore.getState().webUICreatedSessions,
     worktreeMetadata: useSessionManagementStore.getState().worktreeMetadata,
     availableWorktrees: useSessionManagementStore.getState().availableWorktrees,
+    availableWorktreesByProject: useSessionManagementStore.getState().availableWorktreesByProject,
     messages: useMessageStore.getState().messages,
     sessionMemoryState: useMessageStore.getState().sessionMemoryState,
     messageStreamStates: useMessageStore.getState().messageStreamStates,

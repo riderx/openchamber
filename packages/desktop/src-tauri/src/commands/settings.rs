@@ -19,7 +19,7 @@ pub struct RestartResult {
     restarted: bool,
 }
 
-/// Load settings from disk (matches Express handler behavior)
+/// Load settings from disk.
 #[tauri::command]
 pub async fn load_settings(state: State<'_, DesktopRuntime>) -> Result<SettingsLoadResult, String> {
     let settings = state
@@ -34,37 +34,28 @@ pub async fn load_settings(state: State<'_, DesktopRuntime>) -> Result<SettingsL
     })
 }
 
-/// Save settings to disk with merge logic matching Express implementation
+/// Save settings to disk with merge logic.
 #[tauri::command]
 pub async fn save_settings(
     changes: Value,
     state: State<'_, DesktopRuntime>,
 ) -> Result<Value, String> {
-    // Load current settings
-    let current = state
-        .settings()
-        .load()
-        .await
-        .map_err(|e| format!("Failed to load current settings: {}", e))?;
-
-    // Sanitize incoming changes
     let sanitized_changes = sanitize_settings_update(&changes);
 
-    // Merge changes into current settings
-    let merged = merge_persisted_settings(&current, &sanitized_changes);
-
-    // Save merged settings
-    state
+    let (merged, _) = state
         .settings()
-        .save(merged.clone())
+        .update_with(|current| {
+            let mut merged = merge_persisted_settings(&current, &sanitized_changes);
+            normalize_project_selection(&mut merged);
+            (merged, ())
+        })
         .await
         .map_err(|e| format!("Failed to save settings: {}", e))?;
 
-    // Format response
     Ok(format_settings_response(&merged))
 }
 
-/// Restart OpenCode CLI (matches Express /api/config/reload)
+/// Restart the backend process (config reload).
 #[tauri::command]
 pub async fn restart_opencode(state: State<'_, DesktopRuntime>) -> Result<RestartResult, String> {
     state
@@ -74,6 +65,82 @@ pub async fn restart_opencode(state: State<'_, DesktopRuntime>) -> Result<Restar
         .map_err(|e| format!("Failed to restart OpenCode: {}", e))?;
 
     Ok(RestartResult { restarted: true })
+}
+
+fn sanitize_projects(value: &Value) -> Option<Value> {
+    let arr = value.as_array()?;
+    let mut seen_ids = HashSet::new();
+    let mut seen_paths = HashSet::new();
+    let mut result = Vec::new();
+
+    for entry in arr {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+
+        let id = obj.get("id").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let raw_path = obj
+            .get("path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim();
+        if id.is_empty() || raw_path.is_empty() {
+            continue;
+        }
+
+        let expanded = expand_tilde_path(raw_path).to_string_lossy().to_string();
+        let normalized = if expanded == "/" {
+            expanded
+        } else {
+            expanded.trim_end_matches('/').replace('\\', "/")
+        };
+
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if seen_ids.contains(id) || seen_paths.contains(&normalized) {
+            continue;
+        }
+        seen_ids.insert(id.to_string());
+        seen_paths.insert(normalized.clone());
+
+        let mut project = serde_json::Map::new();
+        project.insert("id".to_string(), json!(id));
+        project.insert("path".to_string(), json!(normalized));
+
+        if let Some(Value::String(label)) = obj.get("label") {
+            if !label.trim().is_empty() {
+                project.insert("label".to_string(), json!(label.trim()));
+            }
+        }
+        if let Some(Value::Number(num)) = obj.get("addedAt") {
+            if let Some(value) = num.as_i64() {
+                if value >= 0 {
+                    project.insert("addedAt".to_string(), json!(value));
+                }
+            }
+        }
+        if let Some(Value::Number(num)) = obj.get("lastOpenedAt") {
+            if let Some(value) = num.as_i64() {
+                if value >= 0 {
+                    project.insert("lastOpenedAt".to_string(), json!(value));
+                }
+            }
+        }
+
+        result.push(Value::Object(project));
+    }
+
+    if arr.is_empty() {
+        return Some(Value::Array(vec![]));
+    }
+
+    if result.is_empty() {
+        None
+    } else {
+        Some(Value::Array(result))
+    }
 }
 
 /// Sanitize settings update payload (port of Express sanitizeSettingsUpdate)
@@ -114,6 +181,14 @@ fn sanitize_settings_update(payload: &Value) -> Value {
             if !s.is_empty() {
                 let expanded = expand_tilde_path(s).to_string_lossy().to_string();
                 result_obj.insert("homeDirectory".to_string(), json!(expanded));
+            }
+        }
+        if let Some(projects) = obj.get("projects").and_then(sanitize_projects) {
+            result_obj.insert("projects".to_string(), projects);
+        }
+        if let Some(Value::String(s)) = obj.get("activeProjectId") {
+            if !s.is_empty() {
+                result_obj.insert("activeProjectId".to_string(), json!(s));
             }
         }
         if let Some(Value::String(s)) = obj.get("uiFont") {
@@ -259,6 +334,49 @@ fn sanitize_settings_update(payload: &Value) -> Value {
     result
 }
 
+fn normalize_project_selection(settings: &mut Value) {
+    let Some(obj) = settings.as_object_mut() else {
+        return;
+    };
+
+    let Some(projects) = obj.get("projects").and_then(|value| value.as_array()) else {
+        return;
+    };
+
+    if projects.is_empty() {
+        obj.remove("activeProjectId");
+        return;
+    }
+
+    let current_active = obj
+        .get("activeProjectId")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+
+    let has_active = projects.iter().any(|entry| {
+        entry
+            .get("id")
+            .and_then(|value| value.as_str())
+            .map(|id| id == current_active)
+            .unwrap_or(false)
+    });
+
+    if has_active {
+        return;
+    }
+
+    let first_id = projects
+        .first()
+        .and_then(|entry| entry.get("id"))
+        .and_then(|value| value.as_str());
+
+    if let Some(id) = first_id {
+        obj.insert("activeProjectId".to_string(), json!(id));
+    } else {
+        obj.remove("activeProjectId");
+    }
+}
+
 /// Merge persisted settings (port of Express mergePersistedSettings)
 fn merge_persisted_settings(current: &Value, changes: &Value) -> Value {
     let mut result = current.clone();
@@ -287,6 +405,22 @@ fn merge_persisted_settings(current: &Value, changes: &Value) -> Value {
         if let Some(Value::String(s)) = changes_obj.get("homeDirectory") {
             if !s.is_empty() {
                 additional_approved.push(s.clone());
+            }
+        }
+
+        let project_source = if let Some(Value::Array(arr)) = changes_obj.get("projects") {
+            Some(arr)
+        } else {
+            current.get("projects").and_then(|v| v.as_array())
+        };
+
+        if let Some(entries) = project_source {
+            for entry in entries {
+                if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
+                    if !path.trim().is_empty() {
+                        additional_approved.push(path.trim().to_string());
+                    }
+                }
             }
         }
 

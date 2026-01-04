@@ -70,6 +70,7 @@ export type NewSessionDraftState = {
 export interface SessionStore {
 
     sessions: Session[];
+    sessionsByDirectory: Map<string, Session[]>;
     currentSessionId: string | null;
     lastLoadedDirectory: string | null;
     messages: Map<string, { info: Message; parts: Part[] }[]>;
@@ -96,6 +97,7 @@ export interface SessionStore {
     webUICreatedSessions: Set<string>;
     worktreeMetadata: Map<string, import('@/types/worktree').WorktreeMetadata>;
     availableWorktrees: import('@/types/worktree').WorktreeMetadata[];
+    availableWorktreesByProject: Map<string, import('@/types/worktree').WorktreeMetadata[]>;
 
     currentAgentContext: Map<string, string>;
 
@@ -143,6 +145,7 @@ export interface SessionStore {
     respondToPermission: (sessionId: string, permissionId: string, response: PermissionResponse) => Promise<void>;
     clearError: () => void;
     getSessionsByDirectory: (directory: string) => Session[];
+    getDirectoryForSession: (sessionId: string) => string | null;
     getLastMessageModel: (sessionId: string) => { providerID?: string; modelID?: string } | null;
     getCurrentAgent: (sessionId: string) => string | undefined;
     syncMessages: (sessionId: string, messages: { info: Message; parts: Part[] }[]) => void;
@@ -190,6 +193,7 @@ export interface SessionStore {
 
      pollForTokenUpdates: (sessionId: string, messageId: string, maxAttempts?: number) => void;
      updateSession: (session: Session) => void;
+     removeSessionFromStore: (sessionId: string) => void;
 
      revertToMessage: (sessionId: string, messageId: string) => Promise<void>;
      handleSlashUndo: (sessionId: string) => Promise<void>;

@@ -42,15 +42,7 @@ const sanitizePermissionEntries = (value: unknown): Array<[string, Permission[]]
 const executeWithPermissionDirectory = async <T>(sessionId: string, operation: () => Promise<T>): Promise<T> => {
     try {
         const sessionStore = useSessionStore.getState();
-        const metadata = sessionStore.getWorktreeMetadata(sessionId);
-        if (metadata?.path) {
-            return opencodeClient.withDirectory(metadata.path, operation);
-        }
-
-        const session = sessionStore.sessions.find((entry) => entry.id === sessionId) as { directory?: string } | undefined;
-        const directory =
-            typeof session?.directory === 'string' && session.directory.length > 0 ? session.directory : undefined;
-
+        const directory = sessionStore.getDirectoryForSession(sessionId);
         if (directory) {
             return opencodeClient.withDirectory(directory, operation);
         }

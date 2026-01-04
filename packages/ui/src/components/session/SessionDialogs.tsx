@@ -38,6 +38,9 @@ import {
 import { checkIsGitRepository, ensureOpenChamberIgnored, getGitBranches } from '@/lib/gitApi';
 import { useSessionStore } from '@/stores/useSessionStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
+import { useProjectsStore } from '@/stores/useProjectsStore';
+import { useFileSystemAccess } from '@/hooks/useFileSystemAccess';
+import { isDesktopRuntime } from '@/lib/desktop';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore } from '@/stores/useUIStore';
 import { useDeviceInfo } from '@/lib/device';
@@ -140,7 +143,9 @@ export const SessionDialogs: React.FC = () => {
         getWorktreeMetadata,
         isLoading,
     } = useSessionStore();
-    const { currentDirectory, homeDirectory, hasPersistedDirectory, isHomeReady } = useDirectoryStore();
+    const { currentDirectory, homeDirectory, isHomeReady } = useDirectoryStore();
+    const { projects, addProject } = useProjectsStore();
+    const { requestAccess, startAccessing } = useFileSystemAccess();
     const { agents } = useConfigStore();
     const { isSessionCreateDialogOpen, setSessionCreateDialogOpen } = useUIStore();
     const { isMobile, isTablet, hasTouchInput } = useDeviceInfo();
@@ -214,11 +219,55 @@ export const SessionDialogs: React.FC = () => {
     }, [loadSessions, currentDirectory]);
 
     React.useEffect(() => {
-        if (!hasShownInitialDirectoryPrompt && isHomeReady && !hasPersistedDirectory) {
-            setIsDirectoryDialogOpen(true);
-            setHasShownInitialDirectoryPrompt(true);
+        if (hasShownInitialDirectoryPrompt || !isHomeReady || projects.length > 0) {
+            return;
         }
-    }, [hasPersistedDirectory, hasShownInitialDirectoryPrompt, isHomeReady]);
+
+        setHasShownInitialDirectoryPrompt(true);
+
+        if (isDesktopRuntime()) {
+            requestAccess('')
+                .then(async (result) => {
+                    if (!result.success || !result.path) {
+                        if (result.error && result.error !== 'Directory selection cancelled') {
+                            toast.error('Failed to select directory', {
+                                description: result.error,
+                            });
+                        }
+                        return;
+                    }
+
+                    const accessResult = await startAccessing(result.path);
+                    if (!accessResult.success) {
+                        toast.error('Failed to open directory', {
+                            description: accessResult.error || 'Desktop could not grant file access.',
+                        });
+                        return;
+                    }
+
+                    const added = addProject(result.path, { id: result.projectId });
+                    if (!added) {
+                        toast.error('Failed to add project', {
+                            description: 'Please select a valid directory path.',
+                        });
+                    }
+                })
+                .catch((error) => {
+                    console.error('Desktop: Error selecting directory:', error);
+                    toast.error('Failed to select directory');
+                });
+            return;
+        }
+
+        setIsDirectoryDialogOpen(true);
+    }, [
+        addProject,
+        hasShownInitialDirectoryPrompt,
+        isHomeReady,
+        projects.length,
+        requestAccess,
+        startAccessing,
+    ]);
 
     React.useEffect(() => {
         if (!isSessionCreateDialogOpen) {

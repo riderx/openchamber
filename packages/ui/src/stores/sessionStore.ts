@@ -6,10 +6,13 @@ import { getSafeStorage } from "./utils/safeStorage";
 import type { WorktreeMetadata } from "@/types/worktree";
 import { archiveWorktree, getWorktreeStatus, listWorktrees, mapWorktreeToMetadata } from "@/lib/git/worktreeService";
 import { useDirectoryStore } from "./useDirectoryStore";
+import { useProjectsStore } from "./useProjectsStore";
+import type { ProjectEntry } from "@/lib/api/types";
 import { checkIsGitRepository } from "@/lib/gitApi";
 
 interface SessionState {
     sessions: Session[];
+    sessionsByDirectory: Map<string, Session[]>;
     currentSessionId: string | null;
     lastLoadedDirectory: string | null;
     isLoading: boolean;
@@ -17,6 +20,7 @@ interface SessionState {
     webUICreatedSessions: Set<string>;
     worktreeMetadata: Map<string, WorktreeMetadata>;
     availableWorktrees: WorktreeMetadata[];
+    availableWorktreesByProject: Map<string, WorktreeMetadata[]>;
 }
 
 interface SessionActions {
@@ -30,6 +34,7 @@ interface SessionActions {
     setCurrentSession: (id: string | null) => void;
     clearError: () => void;
     getSessionsByDirectory: (directory: string) => Session[];
+    getDirectoryForSession: (sessionId: string) => string | null;
     applySessionMetadata: (sessionId: string, metadata: Partial<Session>) => void;
     isOpenChamberCreatedSession: (sessionId: string) => boolean;
     markSessionAsOpenChamberCreated: (sessionId: string) => void;
@@ -38,6 +43,7 @@ interface SessionActions {
     getWorktreeMetadata: (sessionId: string) => WorktreeMetadata | undefined;
     setSessionDirectory: (sessionId: string, directory: string | null) => void;
     updateSession: (session: Session) => void;
+    removeSessionFromStore: (sessionId: string) => void;
 }
 
 type SessionStore = SessionState & SessionActions;
@@ -153,6 +159,54 @@ const normalizePath = (value?: string | null): string | null => {
     return replaced.length > 1 ? replaced.replace(/\/+$/, "") : replaced;
 };
 
+const dedupeSessionsById = (sessions: Session[]): Session[] => {
+    const map = new Map<string, Session>();
+
+    sessions.forEach((session) => {
+        if (!session || typeof session.id !== "string" || session.id.length === 0) {
+            return;
+        }
+
+        const existing = map.get(session.id);
+        if (!existing) {
+            map.set(session.id, session);
+            return;
+        }
+
+        const existingUpdated = (existing as { time?: { updated?: number | null } }).time?.updated ?? 0;
+        const candidateUpdated = (session as { time?: { updated?: number | null } }).time?.updated ?? 0;
+        if (candidateUpdated > existingUpdated) {
+            map.set(session.id, session);
+        }
+    });
+
+    return Array.from(map.values());
+};
+
+const buildSessionsByDirectory = (sessions: Session[]): Map<string, Session[]> => {
+    const map = new Map<string, Session[]>();
+
+    sessions.forEach((session) => {
+        const directory = normalizePath((session as { directory?: string | null }).directory ?? null);
+        if (!directory) {
+            return;
+        }
+
+        const existing = map.get(directory);
+        if (existing) {
+            existing.push(session);
+        } else {
+            map.set(directory, [session]);
+        }
+    });
+
+    for (const [key, value] of map.entries()) {
+        map.set(key, dedupeSessionsById(value));
+    }
+
+    return map;
+};
+
 const getSessionDirectory = (sessions: Session[], sessionId: string): string | null => {
     const target = sessions.find((session) => session.id === sessionId);
     if (!target) {
@@ -238,6 +292,7 @@ export const useSessionStore = create<SessionStore>()(
             (set, get) => ({
 
                 sessions: [],
+                sessionsByDirectory: new Map(),
                 currentSessionId: null,
                 lastLoadedDirectory: null,
                 isLoading: false,
@@ -245,212 +300,238 @@ export const useSessionStore = create<SessionStore>()(
                 webUICreatedSessions: new Set(),
                 worktreeMetadata: new Map(),
                 availableWorktrees: [],
+                availableWorktreesByProject: new Map(),
 
                 loadSessions: async () => {
                     set({ isLoading: true, error: null });
                     try {
                         const directoryStore = useDirectoryStore.getState();
-                        const projectDirectory = directoryStore.currentDirectory ?? opencodeClient.getDirectory() ?? null;
+                        const projectsStore = useProjectsStore.getState();
                         const apiClient = opencodeClient.getApiClient();
 
-                        const fetchSessions = async (directoryParam?: string | null): Promise<Session[]> => {
+                        const fetchSessionsForDirectory = async (directoryParam?: string | null): Promise<Session[]> => {
+                            const normalizedDirectory = normalizePath(directoryParam);
                             const response = await apiClient.session.list(
                                 directoryParam ? { directory: directoryParam } : undefined
                             );
-                            return Array.isArray(response.data) ? response.data : [];
+                            const list = Array.isArray(response.data) ? response.data : [];
+
+                            if (!normalizedDirectory) {
+                                return list;
+                            }
+
+                            return list
+                                .map((session) => {
+                                    const sessionDir = normalizePath((session as { directory?: string | null }).directory ?? null) ?? normalizedDirectory;
+                                    return { ...session, directory: sessionDir } as Session;
+                                })
+                                .filter((session) => normalizePath((session as { directory?: string | null }).directory ?? null) === normalizedDirectory);
                         };
 
-                        const normalizedProject = normalizePath(projectDirectory);
+                        const normalizedFallback = normalizePath(directoryStore.currentDirectory ?? opencodeClient.getDirectory() ?? null);
+                        const activeProject = projectsStore.projects.find((project) => project.id === projectsStore.activeProjectId) ?? null;
+                        const activeProjectDirectory = normalizePath(activeProject?.path ?? normalizedFallback ?? null);
 
-                        const isGitRepo = normalizedProject ? await checkIsGitRepository(normalizedProject).catch(() => false) : false;
+                        const projectEntries: Array<Pick<ProjectEntry, 'id' | 'path'>> = projectsStore.projects.length > 0
+                            ? projectsStore.projects
+                            : (activeProjectDirectory ? [{ id: 'legacy', path: activeProjectDirectory }] : []);
 
-                        const parentSessions = await fetchSessions(normalizedProject || null);
+                        type ProjectSessionResult = {
+                            projectId: string;
+                            projectPath: string | null;
+                            sessions: Session[];
+                            discoveredWorktrees: WorktreeMetadata[];
+                            validPaths: Set<string>;
+                        };
 
-                        const subdirectorySessions: Session[] = [];
-                        let discoveredWorktrees: WorktreeMetadata[] = [];
+                        if (projectEntries.length === 0) {
+                            set({
+                                sessions: [],
+                                sessionsByDirectory: new Map(),
+                                currentSessionId: null,
+                                lastLoadedDirectory: null,
+                                isLoading: false,
+                                worktreeMetadata: new Map(),
+                                availableWorktrees: [],
+                                availableWorktreesByProject: new Map(),
+                            });
+                            return;
+                        }
 
-                        if (projectDirectory && isGitRepo && normalizedProject) {
-                            const worktreeRoot = `${normalizedProject}/${WORKTREE_ROOT}`;
-                            try {
-                                const candidates = new Set<string>();
-                                
-                                // Check if .openchamber directory exists before trying to list it
-                                const projectEntries = await opencodeClient.listLocalDirectory(normalizedProject);
-                                const worktreeDirExists = projectEntries.some(
-                                    (entry) => entry.isDirectory && entry.name === WORKTREE_ROOT
-                                );
-                                
-                                if (worktreeDirExists) {
-                                    const entries = await opencodeClient.listLocalDirectory(worktreeRoot);
-                                    entries
-                                        .filter((entry) => entry.isDirectory)
-                                        .forEach((entry) => {
-                                            const isAbsolutePath = /^([A-Za-z]:)?\//.test(entry.path);
-                                            const resolvedPath = isAbsolutePath ? entry.path : `${worktreeRoot}/${entry.name}`;
-                                            candidates.add(normalizePath(resolvedPath) ?? resolvedPath);
+                        const projectResults: ProjectSessionResult[] = await Promise.all(
+                            projectEntries.map(async (project: Pick<ProjectEntry, 'id' | 'path'>) => {
+                                const normalizedProject = normalizePath(project.path);
+                                if (!normalizedProject) {
+                                    return {
+                                        projectId: project.id,
+                                        projectPath: null,
+                                        sessions: [],
+                                        discoveredWorktrees: [],
+                                        validPaths: new Set<string>(),
+                                    };
+                                }
+
+                                const isGitRepo = await checkIsGitRepository(normalizedProject).catch(() => false);
+                                const parentSessions = await fetchSessionsForDirectory(normalizedProject || null);
+
+                                const subdirectorySessions: Session[] = [];
+                                let discoveredWorktrees: WorktreeMetadata[] = [];
+                                const validPaths = new Set<string>();
+                                validPaths.add(normalizedProject);
+
+                                if (isGitRepo) {
+                                    const worktreeRoot = `${normalizedProject}/${WORKTREE_ROOT}`;
+                                    try {
+                                        const candidates = new Set<string>();
+
+                                        // Check if .openchamber directory exists before trying to list it
+                                        const projectEntriesList = await opencodeClient.listLocalDirectory(normalizedProject);
+                                        const worktreeDirExists = projectEntriesList.some(
+                                            (entry) => entry.isDirectory && entry.name === WORKTREE_ROOT
+                                        );
+
+                                        if (worktreeDirExists) {
+                                            const entries = await opencodeClient.listLocalDirectory(worktreeRoot);
+                                            entries
+                                                .filter((entry) => entry.isDirectory)
+                                                .forEach((entry) => {
+                                                    const isAbsolutePath = /^([A-Za-z]:)?\//.test(entry.path);
+                                                    const resolvedPath = isAbsolutePath ? entry.path : `${worktreeRoot}/${entry.name}`;
+                                                    const normalizedPath = normalizePath(resolvedPath) ?? resolvedPath;
+                                                    candidates.add(normalizedPath);
+                                                });
+                                        }
+
+                                        const listedWorktrees = await listWorktrees(normalizedProject);
+                                        if (Array.isArray(listedWorktrees)) {
+                                            discoveredWorktrees = listedWorktrees
+                                                .map((info) => mapWorktreeToMetadata(normalizedProject, info))
+                                                .filter((meta) => meta.path.includes(`/${WORKTREE_ROOT}/`));
+                                            discoveredWorktrees.forEach((meta) => candidates.add(meta.path));
+                                        }
+
+                                        candidates.forEach((candidate) => {
+                                            const normalizedCandidate = normalizePath(candidate) ?? candidate;
+                                            validPaths.add(normalizedCandidate);
                                         });
-                                }
 
-                                const listedWorktrees = await listWorktrees(normalizedProject);
-                                if (Array.isArray(listedWorktrees)) {
-                                    discoveredWorktrees = listedWorktrees
-                                        .map((info) => mapWorktreeToMetadata(normalizedProject, info))
-                                        .filter((meta) => meta.path.includes(`/${WORKTREE_ROOT}/`));
-                                    discoveredWorktrees.forEach((meta) => candidates.add(meta.path));
-                                }
-
-                                if (candidates.size > 0) {
-                                    const results = await Promise.allSettled(
-                                        Array.from(candidates).map((path) => fetchSessions(path))
-                                    );
-                                    results.forEach((result) => {
-                                        if (result.status === "fulfilled" && Array.isArray(result.value)) {
-                                            subdirectorySessions.push(...result.value);
+                                        if (candidates.size > 0) {
+                                            const results = await Promise.allSettled(
+                                                Array.from(candidates).map((path) => fetchSessionsForDirectory(path))
+                                            );
+                                            results.forEach((result) => {
+                                                if (result.status === "fulfilled" && Array.isArray(result.value)) {
+                                                    subdirectorySessions.push(...result.value);
+                                                }
+                                            });
                                         }
-                                    });
-                                }
-                            } catch {
-
-                                discoveredWorktrees = [];
-                            }
-                        }
-
-                        const validPaths = new Set<string>();
-                        if (normalizedProject) {
-                            validPaths.add(normalizedProject);
-                        }
-                        discoveredWorktrees.forEach((meta) => {
-                            const normalized = normalizePath(meta.path);
-                            if (normalized) {
-                                validPaths.add(normalized);
-                            }
-                        });
-
-                        const mergedSessions = [...parentSessions, ...subdirectorySessions].filter((session) => {
-                            const rawDir = (session as { directory?: string | null }).directory ?? normalizedProject ?? null;
-                            const normalizedDir = normalizePath(rawDir);
-                            if (!normalizedDir) {
-                                return false;
-                            }
-                            return validPaths.has(normalizedDir);
-                        });
-                        const stateSnapshot = get();
-
-                        const previousDirectory = stateSnapshot.lastLoadedDirectory ?? null;
-                        const directoryChanged = projectDirectory !== previousDirectory;
-
-                        let nextSessions = [...mergedSessions];
-                        let nextCurrentId = stateSnapshot.currentSessionId;
-
-                        const ensureSessionPresent = (session: Session) => {
-                            nextSessions = [session, ...nextSessions.filter((item) => item.id !== session.id)];
-                        };
-
-                        if (directoryChanged) {
-                            nextCurrentId = nextSessions.length > 0 ? nextSessions[0].id : null;
-                        } else {
-                            if (nextCurrentId) {
-                                const hasCurrent = nextSessions.some((session) => session.id === nextCurrentId);
-                                if (!hasCurrent) {
-                                    const persistedSession = stateSnapshot.sessions.find((session) => session.id === nextCurrentId);
-
-                                    if (persistedSession) {
-                                        ensureSessionPresent(persistedSession);
-                                    } else {
-                                        try {
-                                            const resolvedSession = await opencodeClient.getSession(nextCurrentId);
-                                            ensureSessionPresent(resolvedSession);
-                                        } catch {
-                                            nextCurrentId = nextSessions.length > 0 ? nextSessions[0].id : null;
-                                        }
+                                    } catch {
+                                        discoveredWorktrees = [];
                                     }
                                 }
-                            } else {
-                                nextCurrentId = nextSessions.length > 0 ? nextSessions[0].id : null;
+
+                                const mergedSessions = dedupeSessionsById([...parentSessions, ...subdirectorySessions]);
+
+                                return {
+                                    projectId: project.id,
+                                    projectPath: normalizedProject,
+                                    sessions: mergedSessions,
+                                    discoveredWorktrees,
+                                    validPaths,
+                                };
+                            })
+                        );
+
+                        const sessionsByDirectory = new Map<string, Session[]>();
+                        projectResults.forEach((result) => {
+                            if (!result.projectPath) {
+                                return;
+                            }
+
+                            result.validPaths.forEach((directory) => {
+                                const directoryKey = normalizePath(directory) ?? directory;
+                                const directorySessions = result.sessions.filter((session) => {
+                                    const dir = normalizePath((session as { directory?: string | null }).directory ?? null) ?? directoryKey;
+                                    return dir === directoryKey;
+                                });
+                                sessionsByDirectory.set(directoryKey, dedupeSessionsById(directorySessions));
+                            });
+                        });
+
+                        const mergedSessions: Session[] = dedupeSessionsById(Array.from(sessionsByDirectory.values()).flat());
+                        const stateSnapshot = get();
+
+                        let nextWorktreeMetadata = stateSnapshot.worktreeMetadata;
+                        for (const result of projectResults) {
+                            if (!result.projectPath) {
+                                continue;
+                            }
+                            try {
+                                const hydratedMetadata = await hydrateSessionWorktreeMetadata(
+                                    result.sessions,
+                                    result.projectPath,
+                                    nextWorktreeMetadata
+                                );
+                                if (hydratedMetadata) {
+                                    nextWorktreeMetadata = hydratedMetadata;
+                                }
+                            } catch (metadataError) {
+                                console.debug("Failed to refresh worktree metadata during session load:", metadataError);
                             }
                         }
 
-                        const dedupedSessions = nextSessions.reduce<Session[]>((accumulator, session) => {
-                            if (!accumulator.some((existing) => existing.id === session.id)) {
-                                accumulator.push(session);
+                        const worktreesByProject = new Map<string, WorktreeMetadata[]>();
+                        projectResults.forEach((result) => {
+                            if (result.projectPath) {
+                                worktreesByProject.set(result.projectPath, result.discoveredWorktrees);
                             }
-                            return accumulator;
-                        }, []);
+                        });
 
-                        if (nextCurrentId && !dedupedSessions.some((session) => session.id === nextCurrentId)) {
-                            nextCurrentId = dedupedSessions.length > 0 ? dedupedSessions[0].id : null;
+                        const activeProjectSessions = activeProjectDirectory
+                            ? projectResults.find((result) => result.projectPath === activeProjectDirectory)?.sessions ?? []
+                            : mergedSessions;
+
+                        const validSessionIds = new Set(mergedSessions.map((session) => session.id));
+                        projectResults.forEach((result) => {
+                            if (!result.projectPath) {
+                                return;
+                            }
+
+                            const projectKey = normalizePath(result.projectPath) ?? result.projectPath;
+                            const projectSessions = sessionsByDirectory.get(projectKey) ?? [];
+                            clearInvalidSessionSelection(projectKey, projectSessions.map((session) => session.id));
+                        });
+
+                        const directoryChanged = activeProjectDirectory !== (stateSnapshot.lastLoadedDirectory ?? null);
+
+                        let nextCurrentId = stateSnapshot.currentSessionId;
+                        if (!nextCurrentId || !validSessionIds.has(nextCurrentId) || directoryChanged) {
+                            nextCurrentId = activeProjectSessions[0]?.id ?? mergedSessions[0]?.id ?? null;
                         }
 
-                        const validSessionIds = new Set(dedupedSessions.map((session) => session.id));
+                        if (activeProjectDirectory) {
+                            const activeSessions = sessionsByDirectory.get(activeProjectDirectory) ?? [];
+                            clearInvalidSessionSelection(activeProjectDirectory, activeSessions.map((session) => session.id));
 
-                        const resolveSelectionDirectory = (sessionId: string | null): string | null => {
-                            if (!sessionId) {
-                                return null;
-                            }
-                            const sessionDir = getSessionDirectory(dedupedSessions, sessionId);
-                            if (sessionDir) {
-                                return sessionDir;
-                            }
-                            const persistedDir = getSessionDirectory(stateSnapshot.sessions, sessionId);
-                            if (persistedDir) {
-                                return persistedDir;
-                            }
-                            return null;
-                        };
-
-                        const selectionDirectoryKey = resolveSelectionDirectory(nextCurrentId) ?? normalizedProject ?? projectDirectory ?? null;
-
-                        if (projectDirectory) {
-                            clearInvalidSessionSelection(projectDirectory, validSessionIds);
-                        }
-
-                        if (selectionDirectoryKey) {
-                            clearInvalidSessionSelection(selectionDirectoryKey, validSessionIds);
-                            const storedSelection = getStoredSessionForDirectory(selectionDirectoryKey);
+                            const storedSelection = getStoredSessionForDirectory(activeProjectDirectory);
                             if (storedSelection && validSessionIds.has(storedSelection)) {
                                 nextCurrentId = storedSelection;
                             }
                         }
 
-                        let hydratedMetadata: Map<string, WorktreeMetadata> | null = null;
-                        try {
-                            hydratedMetadata = await hydrateSessionWorktreeMetadata(
-                                dedupedSessions,
-                                projectDirectory,
-                                stateSnapshot.worktreeMetadata
-                            );
-                        } catch (metadataError) {
-                            console.debug("Failed to refresh worktree metadata during session load:", metadataError);
-                        }
-
-                        const nextWorktreeMetadata = (() => {
-                            const source = hydratedMetadata ?? stateSnapshot.worktreeMetadata;
-                            if (!directoryChanged || !normalizedProject) {
-                                return source;
-                            }
-
-                            const filtered = new Map<string, WorktreeMetadata>();
-                            source.forEach((meta, key) => {
-                                if (normalizePath(meta.projectDirectory) === normalizedProject) {
-                                    filtered.set(key, meta);
-                                }
-                            });
-                            return filtered;
-                        })();
-
                         const resolvedDirectoryForCurrent = (() => {
                             if (!nextCurrentId) {
-                                return normalizedProject ?? null;
+                                return activeProjectDirectory ?? null;
                             }
                             const metadataPath = nextWorktreeMetadata.get(nextCurrentId)?.path;
                             if (metadataPath) {
                                 return normalizePath(metadataPath) ?? metadataPath;
                             }
-                            const sessionDir = getSessionDirectory(dedupedSessions, nextCurrentId);
+                            const sessionDir = getSessionDirectory(mergedSessions, nextCurrentId);
                             if (sessionDir) {
                                 return sessionDir;
                             }
-                            return normalizedProject ?? null;
+                            return activeProjectDirectory ?? null;
                         })();
 
                         try {
@@ -459,16 +540,27 @@ export const useSessionStore = create<SessionStore>()(
                             console.warn("Failed to sync OpenCode directory after session load:", error);
                         }
 
+                        const activeWorktrees = activeProjectDirectory
+                            ? projectResults.find((result) => result.projectPath === activeProjectDirectory)?.discoveredWorktrees ?? []
+                            : [];
+
                         set({
-                            sessions: dedupedSessions,
+                            sessions: mergedSessions,
+                            sessionsByDirectory,
                             currentSessionId: nextCurrentId,
-                            lastLoadedDirectory: projectDirectory,
+                            lastLoadedDirectory: activeProjectDirectory ?? null,
                             isLoading: false,
                             worktreeMetadata: nextWorktreeMetadata,
-                            availableWorktrees: discoveredWorktrees,
+                            availableWorktrees: activeWorktrees,
+                            availableWorktreesByProject: worktreesByProject,
                         });
 
-                        storeSessionForDirectory(resolvedDirectoryForCurrent ?? projectDirectory, nextCurrentId);
+                        if (activeProjectDirectory) {
+                            storeSessionForDirectory(activeProjectDirectory, nextCurrentId);
+                        }
+                        if (resolvedDirectoryForCurrent && resolvedDirectoryForCurrent !== activeProjectDirectory) {
+                            storeSessionForDirectory(resolvedDirectoryForCurrent, nextCurrentId);
+                        }
                     } catch (error) {
                         set({
                             error: error instanceof Error ? error.message : "Failed to load sessions",
@@ -501,12 +593,22 @@ export const useSessionStore = create<SessionStore>()(
                         share: undefined,
                     } as Session;
 
-                    set((state) => ({
-                        sessions: [optimisticSession, ...state.sessions],
-                        currentSessionId: tempId,
-                        webUICreatedSessions: new Set([...state.webUICreatedSessions, tempId]),
-                        isLoading: false,
-                    }));
+                    set((state) => {
+                        const nextSessions = [optimisticSession, ...state.sessions];
+                        const nextByDirectory = new Map(state.sessionsByDirectory);
+                        if (targetDirectory) {
+                            const existing = nextByDirectory.get(targetDirectory) ?? [];
+                            nextByDirectory.set(targetDirectory, dedupeSessionsById([optimisticSession, ...existing]));
+                        }
+
+                        return {
+                            sessions: nextSessions,
+                            sessionsByDirectory: nextByDirectory,
+                            currentSessionId: tempId,
+                            webUICreatedSessions: new Set([...state.webUICreatedSessions, tempId]),
+                            isLoading: false,
+                        };
+                    });
 
                     if (targetDirectory) {
                         try {
@@ -519,8 +621,17 @@ export const useSessionStore = create<SessionStore>()(
                     const replaceOptimistic = (real: Session) => {
                         set((state) => {
                             const updatedSessions = state.sessions.map((item) => (item.id === tempId ? real : item));
+
+                            const nextByDirectory = new Map(state.sessionsByDirectory);
+                            if (targetDirectory) {
+                                const existing = nextByDirectory.get(targetDirectory) ?? [];
+                                const replaced = existing.map((item) => (item.id === tempId ? real : item));
+                                nextByDirectory.set(targetDirectory, dedupeSessionsById(replaced));
+                            }
+
                             return {
                                 sessions: updatedSessions,
+                                sessionsByDirectory: buildSessionsByDirectory(updatedSessions),
                                 currentSessionId: real.id,
                                 webUICreatedSessions: new Set([
                                     ...Array.from(state.webUICreatedSessions).filter((id) => id !== tempId),
@@ -646,12 +757,23 @@ export const useSessionStore = create<SessionStore>()(
                             const nextAvailableWorktrees = options?.archiveWorktree && metadata
                                 ? state.availableWorktrees.filter((entry) => normalizePath(entry.path) !== normalizePath(metadata.path))
                                 : state.availableWorktrees;
+                            const nextAvailableWorktreesByProject = new Map(state.availableWorktreesByProject);
+                            if (options?.archiveWorktree && metadata) {
+                                const projectKey = normalizePath(metadata.projectDirectory) ?? metadata.projectDirectory;
+                                const projectWorktrees = nextAvailableWorktreesByProject.get(projectKey) ?? [];
+                                nextAvailableWorktreesByProject.set(
+                                    projectKey,
+                                    projectWorktrees.filter((entry) => normalizePath(entry.path) !== normalizePath(metadata.path))
+                                );
+                            }
                             return {
                                 sessions: filteredSessions,
+                                sessionsByDirectory: buildSessionsByDirectory(filteredSessions),
                                 currentSessionId: nextCurrentId,
                                 isLoading: false,
                                 worktreeMetadata: nextMetadata,
                                 availableWorktrees: nextAvailableWorktrees,
+                                availableWorktreesByProject: nextAvailableWorktreesByProject,
                             };
                         });
 
@@ -774,12 +896,35 @@ export const useSessionStore = create<SessionStore>()(
                                   )
                                 : state.availableWorktrees;
 
+                        const nextAvailableWorktreesByProject = new Map(state.availableWorktreesByProject);
+                        if (removedWorktrees.length > 0) {
+                            const removedPathsByProject = removedWorktrees.reduce<Map<string, Set<string>>>((accumulator, entry) => {
+                                const projectKey = normalizePath(entry.projectDirectory) ?? entry.projectDirectory;
+                                const pathKey = normalizePath(entry.path) ?? entry.path;
+                                if (!accumulator.has(projectKey)) {
+                                    accumulator.set(projectKey, new Set());
+                                }
+                                accumulator.get(projectKey)?.add(pathKey);
+                                return accumulator;
+                            }, new Map());
+
+                            removedPathsByProject.forEach((paths, projectKey) => {
+                                const projectWorktrees = nextAvailableWorktreesByProject.get(projectKey) ?? [];
+                                const filtered = projectWorktrees.filter(
+                                    (entry) => !paths.has(normalizePath(entry.path) ?? entry.path)
+                                );
+                                nextAvailableWorktreesByProject.set(projectKey, filtered);
+                            });
+                        }
+
                         return {
                             sessions: filteredSessions,
+                            sessionsByDirectory: buildSessionsByDirectory(filteredSessions),
                             currentSessionId: nextCurrentId,
                             ...(silent ? {} : { isLoading: false, error: errorMessage }),
                             worktreeMetadata: nextMetadata,
                             availableWorktrees: nextAvailableWorktrees,
+                            availableWorktreesByProject: nextAvailableWorktreesByProject,
                         };
                     });
 
@@ -798,9 +943,10 @@ export const useSessionStore = create<SessionStore>()(
                         const updatedSession = overrideDirectory
                             ? await opencodeClient.withDirectory(overrideDirectory, updateRequest)
                             : await updateRequest();
-                        set((state) => ({
-                            sessions: state.sessions.map((s) => (s.id === id ? updatedSession : s)),
-                        }));
+                        set((state) => {
+                            const sessions = state.sessions.map((s) => (s.id === id ? updatedSession : s));
+                            return { sessions, sessionsByDirectory: buildSessionsByDirectory(sessions) };
+                        });
                     } catch (error) {
                         set({
                             error: error instanceof Error ? error.message : "Failed to update session title",
@@ -826,9 +972,10 @@ export const useSessionStore = create<SessionStore>()(
                             : await shareRequest();
 
                         if (response.data) {
-                            set((state) => ({
-                                sessions: state.sessions.map((s) => (s.id === id ? response.data : s)),
-                            }));
+                            set((state) => {
+                                const sessions = state.sessions.map((s) => (s.id === id ? response.data : s));
+                                return { sessions, sessionsByDirectory: buildSessionsByDirectory(sessions) };
+                            });
                             return response.data;
                         }
                         return null;
@@ -858,9 +1005,10 @@ export const useSessionStore = create<SessionStore>()(
                             : await unshareRequest();
 
                         if (response.data) {
-                            set((state) => ({
-                                sessions: state.sessions.map((s) => (s.id === id ? response.data : s)),
-                            }));
+                            set((state) => {
+                                const sessions = state.sessions.map((s) => (s.id === id ? response.data : s));
+                                return { sessions, sessionsByDirectory: buildSessionsByDirectory(sessions) };
+                            });
                             return response.data;
                         }
                         return null;
@@ -882,9 +1030,34 @@ export const useSessionStore = create<SessionStore>()(
                     set({ error: null });
                 },
 
-                getSessionsByDirectory: () => {
-                    const { sessions } = get();
-                    return sessions;
+                getSessionsByDirectory: (directory: string) => {
+                    const normalized = normalizePath(directory) ?? directory;
+                    const { sessionsByDirectory, sessions } = get();
+
+                    const direct = sessionsByDirectory.get(normalized);
+                    if (direct) {
+                        return direct;
+                    }
+
+                    return sessions.filter((session) => {
+                        const dir = normalizePath((session as { directory?: string | null }).directory ?? null);
+                        return (dir ?? normalized) === normalized;
+                    });
+                },
+
+                getDirectoryForSession: (sessionId: string) => {
+                    if (!sessionId) {
+                        return null;
+                    }
+
+                    const metadata = get().worktreeMetadata.get(sessionId);
+                    if (metadata?.path) {
+                        return normalizePath(metadata.path) ?? metadata.path;
+                    }
+
+                    const entry = get().sessions.find((session) => session.id === sessionId) as { directory?: string | null } | undefined;
+                    const directory = normalizePath(entry?.directory ?? null);
+                    return directory;
                 },
 
                 applySessionMetadata: (sessionId, metadata) => {
@@ -932,7 +1105,10 @@ export const useSessionStore = create<SessionStore>()(
                         const sessions = [...state.sessions];
                         sessions[index] = hasChanged ? mergedSession : existingSession;
 
-                        return hasChanged ? ({ sessions } as Partial<SessionStore>) : state;
+                        return {
+                            sessions,
+                            sessionsByDirectory: buildSessionsByDirectory(sessions),
+                        };
                     });
                 },
 
@@ -1008,7 +1184,7 @@ export const useSessionStore = create<SessionStore>()(
                             delete updatedSession.directory;
                         }
                         sessions[targetIndex] = updatedSession as Session;
-                        return { sessions };
+                        return { sessions, sessionsByDirectory: buildSessionsByDirectory(sessions) };
                     });
 
                     if (previousDirectory) {
@@ -1021,9 +1197,51 @@ export const useSessionStore = create<SessionStore>()(
                 },
 
                 updateSession: (session: Session) => {
-                    set((state) => ({
-                        sessions: state.sessions.map((s) => (s.id === session.id ? session : s)),
-                    }));
+                    set((state) => {
+                        const index = state.sessions.findIndex((s) => s.id === session.id);
+                        const nextSessions = index === -1
+                            ? [session, ...state.sessions]
+                            : state.sessions.map((s) => (s.id === session.id ? session : s));
+
+                        const deduped = dedupeSessionsById(nextSessions);
+
+                        return {
+                            sessions: deduped,
+                            sessionsByDirectory: buildSessionsByDirectory(deduped),
+                        };
+                    });
+                },
+
+                removeSessionFromStore: (sessionId: string) => {
+                    if (!sessionId) {
+                        return;
+                    }
+
+                    set((state) => {
+                        const target = state.sessions.find((session) => session.id === sessionId) as { directory?: string | null } | undefined;
+                        const directory = normalizePath(target?.directory ?? null);
+
+                        const filteredSessions = state.sessions.filter((session) => session.id !== sessionId);
+                        if (filteredSessions.length === state.sessions.length) {
+                            return state;
+                        }
+
+                        const nextMetadata = new Map(state.worktreeMetadata);
+                        nextMetadata.delete(sessionId);
+
+                        const nextCurrentId = state.currentSessionId === sessionId ? null : state.currentSessionId;
+
+                        if (directory) {
+                            storeSessionForDirectory(directory, null);
+                        }
+
+                        return {
+                            sessions: filteredSessions,
+                            sessionsByDirectory: buildSessionsByDirectory(filteredSessions),
+                            currentSessionId: nextCurrentId,
+                            worktreeMetadata: nextMetadata,
+                        };
+                    });
                 },
             }),
             {
@@ -1036,6 +1254,7 @@ export const useSessionStore = create<SessionStore>()(
         webUICreatedSessions: Array.from(state.webUICreatedSessions),
         worktreeMetadata: Array.from(state.worktreeMetadata.entries()),
         availableWorktrees: state.availableWorktrees,
+        availableWorktreesByProject: Array.from(state.availableWorktreesByProject.entries()),
     }),
     merge: (persistedState, currentState) => {
         const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -1066,19 +1285,30 @@ export const useSessionStore = create<SessionStore>()(
             ? (persistedState.availableWorktrees as WorktreeMetadata[])
             : currentState.availableWorktrees;
 
+        const persistedWorktreesByProjectEntries = Array.isArray(persistedState.availableWorktreesByProject)
+            ? (persistedState.availableWorktreesByProject as Array<[string, WorktreeMetadata[]]>)
+            : [];
+        const persistedWorktreesByProject = new Map(persistedWorktreesByProjectEntries);
+
         const lastLoadedDirectory =
             typeof persistedState.lastLoadedDirectory === "string"
                 ? persistedState.lastLoadedDirectory
                 : currentState.lastLoadedDirectory ?? null;
 
+        const mergedSessions = dedupeSessionsById(persistedSessions);
+
         return {
             ...currentState,
             ...persistedState,
-            sessions: persistedSessions,
+            sessions: mergedSessions,
+            sessionsByDirectory: buildSessionsByDirectory(mergedSessions),
             currentSessionId: persistedCurrentSessionId,
             webUICreatedSessions: new Set(webUiSessionsArray),
             worktreeMetadata: new Map(persistedWorktreeEntries),
             availableWorktrees: persistedAvailableWorktrees,
+            availableWorktreesByProject: persistedWorktreesByProject.size > 0
+                ? persistedWorktreesByProject
+                : currentState.availableWorktreesByProject,
             lastLoadedDirectory,
         };
     },
