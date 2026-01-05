@@ -9,7 +9,8 @@ import {
 } from "@/lib/configUpdate";
 import { emitConfigChange, scopeMatches, subscribeToConfigChanges } from "@/lib/configSync";
 import { getSafeStorage } from "./utils/safeStorage";
-import { useDirectoryStore } from "@/stores/useDirectoryStore";
+import { useProjectsStore } from "@/stores/useProjectsStore";
+
 
 export type CommandScope = 'user' | 'project';
 
@@ -36,6 +37,29 @@ export const isCommandBuiltIn = (command: Command): boolean => {
 
 const CONFIG_EVENT_SOURCE = "useCommandsStore";
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const getRequestDirectory = (): string | null => {
+  try {
+    const projectsStore = useProjectsStore.getState();
+    const activeProject = projectsStore.getActiveProject?.();
+    
+    // 1. Primary: Active project path from store
+    if (activeProject?.path?.trim()) {
+      return activeProject.path.trim();
+    }
+
+    // 2. Fallback: current OpenCode directory (session / runtime)
+    const clientDir = opencodeClient.getDirectory();
+    if (clientDir?.trim()) {
+      return clientDir.trim();
+    }
+  } catch (err) {
+    console.warn('[CommandsStore] Error resolving config directory:', err);
+  }
+
+  return null;
+};
+
 const MAX_HEALTH_WAIT_MS = 20000;
 const FAST_HEALTH_POLL_INTERVAL_MS = 300;
 const FAST_HEALTH_POLL_ATTEMPTS = 4;
@@ -100,38 +124,60 @@ export const useCommandsStore = create<CommandsStore>()(
 
           for (let attempt = 0; attempt < 3; attempt++) {
             try {
-              const commands = await opencodeClient.listCommandsWithDetails();
+              const directory = getRequestDirectory();
+              const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
               
-              // Fetch scope info for each command
-              const currentDirectory = useDirectoryStore.getState().currentDirectory;
-              const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+              // Ensure the list is scoped to the same directory we use for config source detection.
+              const commands = await opencodeClient.withDirectory(
+                directory,
+                () => opencodeClient.listCommandsWithDetails()
+              );
               
               const commandsWithScope = await Promise.all(
                 commands.map(async (cmd) => {
                   try {
-                    const response = await fetch(`/api/config/commands/${encodeURIComponent(cmd.name)}${queryParams}`);
+                    // Force no-cache
+                    const response = await fetch(`/api/config/commands/${encodeURIComponent(cmd.name)}${queryParams}`, {
+                      headers: {
+                        'Cache-Control': 'no-cache',
+                        ...(directory ? { 'x-opencode-directory': directory } : {}),
+                      }
+                    });
+                    
                     if (response.ok) {
                       const data = await response.json();
-                      const sources = (data?.sources || null) as
-                        | { md?: { exists?: boolean; scope?: unknown }; json?: { exists?: boolean; scope?: unknown } }
-                        | null;
+                      
+                      // Prioritize explicit scope
+                      let scope = data.scope;
+                      
+                      // Fallback to deducing from sources
+                      if (!scope && data.sources) {
+                        const sources = data.sources;
+                        scope = (sources.md?.exists ? sources.md.scope : undefined)
+                          ?? (sources.json?.exists ? sources.json.scope : undefined)
+                          ?? sources.md?.scope
+                          ?? sources.json?.scope;
+                      }
 
-                      const scope = (sources?.md?.exists ? sources.md.scope : undefined)
-                        ?? (sources?.json?.exists ? sources.json.scope : undefined)
-                        ?? data.scope
-                        ?? sources?.md?.scope
-                        ?? sources?.json?.scope;
-
-                      return { ...cmd, scope: scope as CommandScope | undefined };
+                      if (scope === 'project' || scope === 'user') {
+                        return { ...cmd, scope: scope as CommandScope };
+                      }
+                      
+                      // Explicitly set null scope if not found
+                      return { ...cmd, scope: undefined };
                     }
-                  } catch {
-                    // Ignore errors fetching scope
+                  } catch (err) {
+                    console.warn(`[CommandsStore] Failed to fetch config for command ${cmd.name}:`, err);
                   }
                   return cmd;
                 })
               );
               
-              set({ commands: commandsWithScope, isLoading: false });
+              if (JSON.stringify(previousCommands) !== JSON.stringify(commandsWithScope)) {
+                set({ commands: commandsWithScope, isLoading: false });
+              } else {
+                set({ isLoading: false });
+              }
               return true;
             } catch (error) {
               lastError = error;
@@ -163,13 +209,15 @@ export const useCommandsStore = create<CommandsStore>()(
 
             console.log('[CommandsStore] Command config to save:', commandConfig);
 
-            // Get current directory for project-level command support
-            const currentDirectory = useDirectoryStore.getState().currentDirectory;
-            const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+            const directory = getRequestDirectory();
+            const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
             const response = await fetch(`/api/config/commands/${encodeURIComponent(config.name)}${queryParams}`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(directory ? { 'x-opencode-directory': directory } : {}),
+              },
               body: JSON.stringify(commandConfig)
             });
 
@@ -223,13 +271,15 @@ export const useCommandsStore = create<CommandsStore>()(
 
             console.log('[CommandsStore] Command config to update:', commandConfig);
 
-            // Get current directory for project-level command support
-            const currentDirectory = useDirectoryStore.getState().currentDirectory;
-            const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+            const directory = getRequestDirectory();
+            const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
             const response = await fetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
               method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(directory ? { 'x-opencode-directory': directory } : {}),
+              },
               body: JSON.stringify(commandConfig)
             });
 
@@ -270,12 +320,13 @@ export const useCommandsStore = create<CommandsStore>()(
           startConfigUpdate("Deleting command configuration…");
           let requiresReload = false;
           try {
-            // Get current directory for project-level command support
-            const currentDirectory = useDirectoryStore.getState().currentDirectory;
-            const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+            // Use active project root for project-level command support
+            const directory = getRequestDirectory();
+            const queryParams = directory ? `?directory=${encodeURIComponent(directory)}` : '';
 
             const response = await fetch(`/api/config/commands/${encodeURIComponent(name)}${queryParams}`, {
-              method: 'DELETE'
+              method: 'DELETE',
+              headers: directory ? { 'x-opencode-directory': directory } : undefined,
             });
 
             const payload = await response.json().catch(() => null);

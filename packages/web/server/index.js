@@ -2602,6 +2602,7 @@ async function main(options = {}) {
   const {
     getAgentSources,
     getAgentScope,
+    getAgentConfig,
     createAgent,
     updateAgent,
     deleteAgent,
@@ -2636,6 +2637,22 @@ async function main(options = {}) {
     } catch (error) {
       console.error('Failed to get agent sources:', error);
       res.status(500).json({ error: 'Failed to get agent configuration metadata' });
+    }
+  });
+
+  app.get('/api/config/agents/:name/config', async (req, res) => {
+    try {
+      const agentName = req.params.name;
+      const { directory, error } = await resolveProjectDirectory(req);
+      if (!directory) {
+        return res.status(400).json({ error });
+      }
+
+      const configInfo = getAgentConfig(agentName, directory);
+      res.json(configInfo);
+    } catch (error) {
+      console.error('Failed to get agent config:', error);
+      res.status(500).json({ error: 'Failed to get agent configuration' });
     }
   });
 

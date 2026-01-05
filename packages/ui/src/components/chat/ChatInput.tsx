@@ -47,6 +47,70 @@ interface ChatInputProps {
 
 const isPrimaryMode = (mode?: string) => mode === 'primary' || mode === 'all' || mode === undefined || mode === null;
 
+type PermissionAction = 'allow' | 'ask' | 'deny';
+type PermissionRule = { permission: string; pattern: string; action: PermissionAction };
+
+const asPermissionRuleset = (value: unknown): PermissionRule[] | null => {
+    if (!Array.isArray(value)) {
+        return null;
+    }
+    const rules: PermissionRule[] = [];
+    for (const entry of value) {
+        if (!entry || typeof entry !== 'object') {
+            continue;
+        }
+        const candidate = entry as Partial<PermissionRule>;
+        if (typeof candidate.permission !== 'string' || typeof candidate.pattern !== 'string' || typeof candidate.action !== 'string') {
+            continue;
+        }
+        if (candidate.action !== 'allow' && candidate.action !== 'ask' && candidate.action !== 'deny') {
+            continue;
+        }
+        rules.push({ permission: candidate.permission, pattern: candidate.pattern, action: candidate.action });
+    }
+    return rules;
+};
+
+const resolveWildcardPermissionAction = (ruleset: unknown, permission: string): PermissionAction | undefined => {
+    const rules = asPermissionRuleset(ruleset);
+    if (!rules || rules.length === 0) {
+        return undefined;
+    }
+
+    for (let i = rules.length - 1; i >= 0; i -= 1) {
+        const rule = rules[i];
+        if (rule.permission === permission && rule.pattern === '*') {
+            return rule.action;
+        }
+    }
+
+    for (let i = rules.length - 1; i >= 0; i -= 1) {
+        const rule = rules[i];
+        if (rule.permission === '*' && rule.pattern === '*') {
+            return rule.action;
+        }
+    }
+
+    return undefined;
+};
+
+const buildPermissionActionMap = (ruleset: unknown, permission: string): Record<string, PermissionAction | undefined> | undefined => {
+    const rules = asPermissionRuleset(ruleset);
+    if (!rules || rules.length === 0) {
+        return undefined;
+    }
+
+    const map: Record<string, PermissionAction | undefined> = {};
+    for (const rule of rules) {
+        if (rule.permission !== permission) {
+            continue;
+        }
+        map[rule.pattern] = rule.action;
+    }
+
+    return Object.keys(map).length > 0 ? map : undefined;
+};
+
 export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBottom }) => {
     const [message, setMessage] = React.useState('');
     const [isDragging, setIsDragging] = React.useState(false);
@@ -174,19 +238,12 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
     }, [agents, currentAgentName]);
 
     const agentDefaultEditMode = React.useMemo<EditPermissionMode>(() => {
-        const agentPermissionRaw = currentAgent?.permission?.edit;
-        let defaultMode: EditPermissionMode = 'ask';
-
-        if (agentPermissionRaw === 'allow' || agentPermissionRaw === 'ask' || agentPermissionRaw === 'deny' || agentPermissionRaw === 'full') {
-            defaultMode = agentPermissionRaw;
+        if (!currentAgent) {
+            return 'deny';
         }
 
-        const editToolConfigured = currentAgent ? (currentAgent.tools?.['edit'] !== false) : false;
-        if (!currentAgent || !editToolConfigured) {
-            defaultMode = 'deny';
-        }
-
-        return defaultMode;
+        const action = resolveWildcardPermissionAction(currentAgent.permission, 'edit') ?? 'ask';
+        return action;
     }, [currentAgent]);
 
     const sessionAgentEditOverride = useSessionStore(
@@ -199,8 +256,20 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
         }, [currentSessionId, currentAgentName])
     );
 
-    const agentWebfetchPermission = currentAgent?.permission?.webfetch;
-    const agentBashPermission = currentAgent?.permission?.bash as BashPermissionSetting | undefined;
+    const agentWebfetchPermission = React.useMemo(() => {
+        if (!currentAgent) {
+            return undefined;
+        }
+        return resolveWildcardPermissionAction(currentAgent.permission, 'webfetch');
+    }, [currentAgent]);
+
+    const agentBashPermission = React.useMemo<BashPermissionSetting | undefined>(() => {
+        if (!currentAgent) {
+            return undefined;
+        }
+        const map = buildPermissionActionMap(currentAgent.permission, 'bash');
+        return map ? (map as BashPermissionSetting) : undefined;
+    }, [currentAgent]);
 
     const permissionUiState = React.useMemo(() => calculateEditPermissionUIState({
         agentDefaultEditMode,

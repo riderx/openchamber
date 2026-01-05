@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import type { StoreApi, UseBoundStore } from "zustand";
 import { devtools, persist, createJSONStorage } from "zustand/middleware";
-import type { Agent } from "@opencode-ai/sdk/v2";
+import type { Agent, PermissionConfig } from "@opencode-ai/sdk/v2";
 import { opencodeClient } from "@/lib/opencode/client";
 import { emitConfigChange, scopeMatches, subscribeToConfigChanges, type ConfigChangeScope } from "@/lib/configSync";
 import {
@@ -38,6 +38,28 @@ const getCurrentDirectory = (): string | null => {
   return null;
 };
 
+const getConfigDirectory = (): string | null => {
+  try {
+    const projectsStore = useProjectsStore.getState();
+    const activeProject = projectsStore.getActiveProject?.();
+    
+    // 1. Primary: Active project path from store
+    if (activeProject?.path?.trim()) {
+      return activeProject.path.trim();
+    }
+
+    // 2. Fallback: current OpenCode directory (session / runtime)
+    const clientDir = opencodeClient.getDirectory();
+    if (clientDir?.trim()) {
+      return clientDir.trim();
+    }
+  } catch (err) {
+    console.warn('[AgentsStore] Error resolving config directory:', err);
+  }
+
+  return null;
+};
+
 export type AgentScope = 'user' | 'project';
 
 export interface AgentConfig {
@@ -48,15 +70,7 @@ export interface AgentConfig {
   top_p?: number;
   prompt?: string;
   mode?: "primary" | "subagent" | "all";
-  tools?: Record<string, boolean>;
-  permission?: {
-     edit?: "allow" | "ask" | "deny";
-     bash?: "allow" | "ask" | "deny" | Record<string, "allow" | "ask" | "deny">;
-     skill?: "allow" | "ask" | "deny" | Record<string, "allow" | "ask" | "deny">;
-     webfetch?: "allow" | "ask" | "deny";
-     doom_loop?: "allow" | "ask" | "deny";
-     external_directory?: "allow" | "ask" | "deny";
-   };
+  permission?: PermissionConfig | null;
 
   disable?: boolean;
   scope?: AgentScope;
@@ -104,15 +118,7 @@ export interface AgentDraft {
   top_p?: number;
   prompt?: string;
   mode?: "primary" | "subagent" | "all";
-  tools?: Record<string, boolean>;
-  permission?: {
-     edit?: "allow" | "ask" | "deny";
-     bash?: "allow" | "ask" | "deny" | Record<string, "allow" | "ask" | "deny">;
-     skill?: "allow" | "ask" | "deny" | Record<string, "allow" | "ask" | "deny">;
-     webfetch?: "allow" | "ask" | "deny";
-     doom_loop?: "allow" | "ask" | "deny";
-     external_directory?: "allow" | "ask" | "deny";
-   };
+  permission?: PermissionConfig;
   disable?: boolean;
 }
 
@@ -161,52 +167,67 @@ export const useAgentsStore = create<AgentsStore>()(
         loadAgents: async () => {
           set({ isLoading: true });
           const previousAgents = get().agents;
-          let lastError: unknown = null;
 
           for (let attempt = 0; attempt < 3; attempt++) {
             try {
-              const agents = await opencodeClient.listAgents();
-              
-              // Fetch scope info for each agent
-              const currentDirectory = getCurrentDirectory();
-              const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
-              
+              const configDirectory = getConfigDirectory();
+              const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
+
+              // Ensure we list agents using the correct project context
+              const agents = await opencodeClient.withDirectory(configDirectory, () => opencodeClient.listAgents());
+
               const agentsWithScope = await Promise.all(
                 agents.map(async (agent) => {
                   try {
-                    const response = await fetch(`/api/config/agents/${encodeURIComponent(agent.name)}${queryParams}`);
+                    // Force no-cache to ensure we get the latest scope info
+                    const response = await fetch(`/api/config/agents/${encodeURIComponent(agent.name)}${queryParams}`, {
+                      headers: {
+                        'Cache-Control': 'no-cache',
+                        ...(configDirectory ? { 'x-opencode-directory': configDirectory } : {}),
+                      }
+                    });
+                    
                     if (response.ok) {
                       const data = await response.json();
-                      const sources = (data?.sources || null) as
-                        | { md?: { exists?: boolean; scope?: unknown }; json?: { exists?: boolean; scope?: unknown } }
-                        | null;
+                      
+                      // Prioritize explicit scope from server response
+                      let scope = data.scope;
+                      
+                      // Fallback to deducing from sources if top-level scope is missing
+                      if (!scope && data.sources) {
+                        const sources = data.sources;
+                        scope = (sources.md?.exists ? sources.md.scope : undefined)
+                          ?? (sources.json?.exists ? sources.json.scope : undefined)
+                          ?? sources.md?.scope
+                          ?? sources.json?.scope;
+                      }
 
-                      const scope = (sources?.md?.exists ? sources.md.scope : undefined)
-                        ?? (sources?.json?.exists ? sources.json.scope : undefined)
-                        ?? data.scope
-                        ?? sources?.md?.scope
-                        ?? sources?.json?.scope;
-
-                      return { ...agent, scope: scope as AgentScope | undefined };
+                      if (scope === 'project' || scope === 'user') {
+                        return { ...agent, scope: scope as AgentScope };
+                      }
+                      
+                      // Explicitly set null scope if not found, to clear stale state
+                      return { ...agent, scope: undefined };
                     }
-                  } catch {
-                    // Ignore scope fetch errors and fall back to agent defaults
+                  } catch (err) {
+                    console.warn(`[AgentsStore] Failed to fetch config for agent ${agent.name}:`, err);
                   }
                   return agent;
                 })
               );
-              
-              set({ agents: agentsWithScope, isLoading: false });
+
+              if (JSON.stringify(previousAgents) !== JSON.stringify(agentsWithScope)) {
+                set({ agents: agentsWithScope, isLoading: false });
+              } else {
+                set({ isLoading: false });
+              }
               return true;
-            } catch (error) {
-              lastError = error;
-              const waitMs = 200 * (attempt + 1);
-              await new Promise((resolve) => setTimeout(resolve, waitMs));
+            } catch {
+              // ignore error
             }
           }
-
-          console.error("Failed to load agents:", lastError);
-          set({ agents: previousAgents, isLoading: false });
+          
+          set({ isLoading: false });
           return false;
         },
 
@@ -214,8 +235,10 @@ export const useAgentsStore = create<AgentsStore>()(
           startConfigUpdate("Creating agent configuration…");
           let requiresReload = false;
           try {
+            console.log('[AgentsStore] Creating agent:', config.name);
+
             const agentConfig: Record<string, unknown> = {
-              mode: config.mode || "subagent",
+              mode: config.mode || 'subagent',
             };
 
             if (config.description) agentConfig.description = config.description;
@@ -223,18 +246,21 @@ export const useAgentsStore = create<AgentsStore>()(
             if (config.temperature !== undefined) agentConfig.temperature = config.temperature;
             if (config.top_p !== undefined) agentConfig.top_p = config.top_p;
             if (config.prompt) agentConfig.prompt = config.prompt;
-            if (config.tools && Object.keys(config.tools).length > 0) agentConfig.tools = config.tools;
             if (config.permission) agentConfig.permission = config.permission;
             if (config.disable !== undefined) agentConfig.disable = config.disable;
             if (config.scope) agentConfig.scope = config.scope;
 
-            // Get current directory for project-level agent support
-            const currentDirectory = getCurrentDirectory();
-            const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+            console.log('[AgentsStore] Agent config to save:', agentConfig);
+
+            const configDirectory = getConfigDirectory();
+            const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
 
             const response = await fetch(`/api/config/agents/${encodeURIComponent(config.name)}${queryParams}`, {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(configDirectory ? { 'x-opencode-directory': configDirectory } : {}),
+              },
               body: JSON.stringify(agentConfig)
             });
 
@@ -261,7 +287,8 @@ export const useAgentsStore = create<AgentsStore>()(
               emitConfigChange("agents", { source: CONFIG_EVENT_SOURCE });
             }
             return loaded;
-          } catch {
+          } catch (error) {
+            console.error('Failed to create agent:', error);
             return false;
           } finally {
             if (!requiresReload) {
@@ -282,17 +309,19 @@ export const useAgentsStore = create<AgentsStore>()(
             if (config.temperature !== undefined) agentConfig.temperature = config.temperature;
             if (config.top_p !== undefined) agentConfig.top_p = config.top_p;
             if (config.prompt !== undefined) agentConfig.prompt = config.prompt;
-            if (config.tools !== undefined) agentConfig.tools = config.tools;
             if (config.permission !== undefined) agentConfig.permission = config.permission;
             if (config.disable !== undefined) agentConfig.disable = config.disable;
 
-            // Get current directory for project-level agent support
-            const currentDirectory = getCurrentDirectory();
-            const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+            // Use active project root for project-level agent support.
+            const configDirectory = getConfigDirectory();
+            const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
 
             const response = await fetch(`/api/config/agents/${encodeURIComponent(name)}${queryParams}`, {
               method: 'PATCH',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                ...(configDirectory ? { 'x-opencode-directory': configDirectory } : {}),
+              },
               body: JSON.stringify(agentConfig)
             });
 
@@ -319,8 +348,9 @@ export const useAgentsStore = create<AgentsStore>()(
               emitConfigChange("agents", { source: CONFIG_EVENT_SOURCE });
             }
             return loaded;
-          } catch {
-            return false;
+          } catch (error) {
+            console.error('Failed to update agent:', error);
+            throw error;
           } finally {
             if (!requiresReload) {
               finishConfigUpdate();
@@ -332,12 +362,13 @@ export const useAgentsStore = create<AgentsStore>()(
           startConfigUpdate("Deleting agent configuration…");
           let requiresReload = false;
           try {
-            // Get current directory for project-level agent support
-            const currentDirectory = getCurrentDirectory();
-            const queryParams = currentDirectory ? `?directory=${encodeURIComponent(currentDirectory)}` : '';
+            // Use active project root for project-level agent support.
+            const configDirectory = getConfigDirectory();
+            const queryParams = configDirectory ? `?directory=${encodeURIComponent(configDirectory)}` : '';
 
             const response = await fetch(`/api/config/agents/${encodeURIComponent(name)}${queryParams}`, {
-              method: 'DELETE'
+              method: 'DELETE',
+              headers: configDirectory ? { 'x-opencode-directory': configDirectory } : undefined,
             });
 
             const payload = await response.json().catch(() => null);
@@ -366,7 +397,6 @@ export const useAgentsStore = create<AgentsStore>()(
             if (get().selectedAgentName === name) {
               set({ selectedAgentName: null });
             }
-
             return loaded;
           } catch {
             return false;
@@ -376,6 +406,7 @@ export const useAgentsStore = create<AgentsStore>()(
             }
           }
         },
+
 
         getAgentByName: (name: string) => {
           const { agents } = get();

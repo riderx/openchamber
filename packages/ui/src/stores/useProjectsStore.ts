@@ -32,12 +32,33 @@ const safeStorage = getSafeStorage();
 const PROJECTS_STORAGE_KEY = 'projects';
 const ACTIVE_PROJECT_STORAGE_KEY = 'activeProjectId';
 
+const resolveTildePath = (value: string, homeDir?: string | null): string => {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith('~')) {
+    return trimmed;
+  }
+  if (!homeDir) {
+    return trimmed;
+  }
+  if (trimmed === '~') {
+    return homeDir;
+  }
+  if (trimmed.startsWith('~/') || trimmed.startsWith('~\\')) {
+    return `${homeDir}${trimmed.slice(1)}`;
+  }
+  return trimmed;
+};
+
 const normalizeProjectPath = (value: string): string => {
   const trimmed = value.trim();
   if (!trimmed) {
     return '';
   }
-  const normalized = trimmed.replace(/\\/g, '/');
+
+  const homeDirectory = safeStorage.getItem('homeDirectory') || useDirectoryStore.getState().homeDirectory || '';
+  const expanded = resolveTildePath(trimmed, homeDirectory);
+
+  const normalized = expanded.replace(/\\/g, '/');
   if (normalized === '/') {
     return '/';
   }

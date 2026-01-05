@@ -5,7 +5,8 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useUIStore, type EventStreamStatus } from '@/stores/useUIStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
-import type { Part, Session, Message, Permission } from '@opencode-ai/sdk/v2';
+import type { Part, Session, Message } from '@opencode-ai/sdk/v2';
+import type { PermissionRequest } from '@/types/permission';
 import { streamDebugEnabled } from '@/stores/utils/streamDebug';
 import { handleTodoUpdatedEvent } from '@/stores/useTodoStore';
 
@@ -128,6 +129,31 @@ export const useEventStream = () => {
     }
     return undefined;
   }, [activeSessionDirectory, fallbackDirectory]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    const bootstrapPendingPermissions = async () => {
+      try {
+        const pending = await opencodeClient.listPendingPermissions();
+        if (cancelled || pending.length === 0) {
+          return;
+        }
+
+        pending.forEach((request) => {
+          addPermission(request as unknown as PermissionRequest);
+        });
+      } catch {
+        // ignored
+      }
+    };
+
+    void bootstrapPendingPermissions();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [addPermission]);
 
   const normalizeDirectory = React.useCallback((value: string | null | undefined): string | null => {
     if (typeof value !== 'string') return null;
@@ -406,12 +432,28 @@ export const useEventStream = () => {
     sessionStatusLastRefreshAtRef.current = now;
 
     const applyStatusMap = (statusMap: Record<string, { type?: string }>) => {
+      const observed = new Set<string>();
+      const knownSessionIds = new Set(sessions.map((session) => session.id));
+
       Object.entries(statusMap).forEach(([sessionId, raw]) => {
         if (!sessionId || !raw) return;
+        observed.add(sessionId);
         const phase: 'idle' | 'busy' =
           raw.type === 'busy' || raw.type === 'retry' ? 'busy' : 'idle';
         updateSessionActivityPhase(sessionId, phase);
       });
+
+      // OpenCode's /session/status may omit idle sessions (returns only busy/retry).
+      // Treat missing entries as idle to avoid sessions getting stuck "working".
+      const currentPhases = useSessionStore.getState().sessionActivityPhase;
+      if (!currentPhases) return;
+
+      for (const [sessionId, phase] of currentPhases.entries()) {
+        if (!knownSessionIds.has(sessionId)) continue;
+        if ((phase === 'busy' || phase === 'cooldown') && !observed.has(sessionId)) {
+          updateSessionActivityPhase(sessionId, 'idle');
+        }
+      }
     };
 
     const task = (async (): Promise<void> => {
@@ -450,6 +492,19 @@ export const useEventStream = () => {
           if (result.status !== 'fulfilled' || !result.value) return;
           Object.assign(merged, result.value);
         });
+
+        if (Object.keys(merged).length === 0) {
+          const hasActivePhases = Array.from(useSessionStore.getState().sessionActivityPhase?.values?.() ?? []).some(
+            (phase) => phase === 'busy' || phase === 'cooldown'
+          );
+
+          if (hasActivePhases) {
+            const healthy = await opencodeClient.checkHealth().catch(() => false);
+            if (!healthy) {
+              return;
+            }
+          }
+        }
 
         applyStatusMap(merged);
       } catch {
@@ -1017,66 +1072,29 @@ export const useEventStream = () => {
         break;
       }
 
-      case 'permission.updated': {
-        const sessionId = typeof props.sessionID === 'string' ? props.sessionID : null;
-        if (sessionId) {
-          addPermission(props as unknown as Permission);
-        }
-        break;
-      }
-
       case 'permission.asked': {
-        // Permission request event schema (SDK v2)
         if (!('sessionID' in props) || typeof props.sessionID !== 'string') {
           break;
         }
 
-        const askedProps = props as {
-          id: string;
-          permission: string;
-          sessionID: string;
-          patterns?: string[];
-          always?: string[];
-          metadata: Record<string, unknown>;
-          tool?: {
-            messageID: string;
-            callID: string;
-          };
-        };
+        const request = props as unknown as PermissionRequest;
 
-        // Convert new permission.asked event format to Permission type
-        const permission = {
-          id: askedProps.id,
-          type: askedProps.permission,
-          pattern: askedProps.patterns, // Map patterns to pattern field for compatibility
-          sessionID: askedProps.sessionID,
-          messageID: askedProps.tool?.messageID || askedProps.sessionID,
-          callID: askedProps.tool?.callID,
-          title: `${askedProps.permission} permission required`,
-          metadata: {
-            ...askedProps.metadata,
-            always: askedProps.always, // Store always in metadata for UI access
-            patterns: askedProps.patterns,
-          },
-          time: { created: Date.now() },
-        } as unknown as Permission;
-
-        addPermission(permission);
+        addPermission(request);
 
         // Notify if permission is for another session (common with child sessions).
-        const toastKey = `${askedProps.sessionID}:${askedProps.id}`;
+        const toastKey = `${request.sessionID}:${request.id}`;
         if (!permissionToastShownRef.current.has(toastKey)) {
           setTimeout(() => {
             const current = currentSessionIdRef.current;
-            if (current === askedProps.sessionID) {
+            if (current === request.sessionID) {
               return;
             }
 
             const pending = useSessionStore
               .getState()
               .permissions
-              .get(askedProps.sessionID)
-              ?.some((entry) => entry.id === askedProps.id);
+              .get(request.sessionID)
+              ?.some((entry) => entry.id === request.id);
 
             if (!pending) {
               return;
@@ -1085,7 +1103,7 @@ export const useEventStream = () => {
             permissionToastShownRef.current.add(toastKey);
 
             const sessionTitle =
-              useSessionStore.getState().sessions.find((s) => s.id === askedProps.sessionID)?.title ||
+              useSessionStore.getState().sessions.find((s) => s.id === request.sessionID)?.title ||
               'Session';
 
             import('sonner').then(({ toast }) => {
@@ -1095,7 +1113,7 @@ export const useEventStream = () => {
                   label: 'Open',
                   onClick: () => {
                     useUIStore.getState().setActiveMainTab('chat');
-                    void useSessionStore.getState().setCurrentSession(askedProps.sessionID);
+                    void useSessionStore.getState().setCurrentSession(request.sessionID);
                   },
                 },
               });
@@ -1107,7 +1125,6 @@ export const useEventStream = () => {
       }
 
       case 'permission.replied':
-        // Permission was responded to - UI will update via permissionStore
         break;
 
       case 'todo.updated': {
@@ -1237,9 +1254,9 @@ export const useEventStream = () => {
       lastEventTimestampRef.current = Date.now();
       publishStatus('connected', null);
       checkConnection();
-
+ 
       const hasBusySessions = Array.from(useSessionStore.getState().sessionActivityPhase?.values?.() ?? []).some(
-        (phase) => phase === 'busy'
+        (phase) => phase === 'busy' || phase === 'cooldown'
       );
       if (hasBusySessions) {
         void refreshSessionActivityStatus();
@@ -1495,7 +1512,7 @@ export const useEventStream = () => {
 
       const now = Date.now();
       const hasBusySessions = Array.from(useSessionStore.getState().sessionActivityPhase?.values?.() ?? []).some(
-        (phase) => phase === 'busy'
+        (phase) => phase === 'busy' || phase === 'cooldown'
       );
       if (hasBusySessions) {
         void refreshSessionActivityStatus();

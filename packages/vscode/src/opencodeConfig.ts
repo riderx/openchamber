@@ -172,9 +172,37 @@ const writePromptFile = (filePath: string, content: string) => {
   fs.writeFileSync(filePath, content, 'utf8');
 };
 
+/**
+ * Get all possible project config paths in priority order
+ * Priority: root > .opencode/, json > jsonc
+ */
+const getProjectConfigCandidates = (workingDirectory?: string): string[] => {
+  if (!workingDirectory) return [];
+  return [
+    path.join(workingDirectory, 'opencode.json'),
+    path.join(workingDirectory, 'opencode.jsonc'),
+    path.join(workingDirectory, '.opencode', 'opencode.json'),
+    path.join(workingDirectory, '.opencode', 'opencode.jsonc'),
+  ];
+};
+
+/**
+ * Find existing project config file or return default path for new config
+ */
 const getProjectConfigPath = (workingDirectory?: string): string | null => {
   if (!workingDirectory) return null;
-  return path.join(workingDirectory, 'opencode.json');
+
+  const candidates = getProjectConfigCandidates(workingDirectory);
+
+  // Return first existing config file
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  // Default to root opencode.json for new configs
+  return candidates[0] || null;
 };
 
 const getConfigPaths = (workingDirectory?: string) => ({

@@ -2,7 +2,7 @@ import { create } from "zustand";
 import type { StoreApi, UseBoundStore } from "zustand";
 import { devtools } from "zustand/middleware";
 import type { Session, Message, Part } from "@opencode-ai/sdk/v2";
-import type { Permission, PermissionResponse } from "@/types/permission";
+import type { PermissionRequest, PermissionResponse } from "@/types/permission";
 import type { SessionStore, AttachedFile, EditPermissionMode } from "./types/sessionTypes";
 import { ACTIVE_SESSION_WINDOW, MEMORY_LIMITS } from "./types/sessionTypes";
 
@@ -422,7 +422,7 @@ export const useSessionStore = create<SessionStore>()(
                 markMessageStreamSettled: (messageId: string) => useMessageStore.getState().markMessageStreamSettled(messageId),
                 updateMessageInfo: (sessionId: string, messageId: string, messageInfo: Record<string, unknown>) => useMessageStore.getState().updateMessageInfo(sessionId, messageId, messageInfo),
                 updateSessionCompaction: (sessionId: string, compactingTimestamp?: number | null) => useMessageStore.getState().updateSessionCompaction(sessionId, compactingTimestamp ?? null),
-                addPermission: (permission: Permission) => {
+                addPermission: (permission: PermissionRequest) => {
                     const contextData = {
                         currentAgentContext: useContextStore.getState().currentAgentContext,
                         sessionAgentSelections: useContextStore.getState().sessionAgentSelections,
@@ -430,7 +430,7 @@ export const useSessionStore = create<SessionStore>()(
                     };
                     return usePermissionStore.getState().addPermission(permission, contextData);
                 },
-                respondToPermission: (sessionId: string, permissionId: string, response: PermissionResponse) => usePermissionStore.getState().respondToPermission(sessionId, permissionId, response),
+                respondToPermission: (sessionId: string, requestId: string, response: PermissionResponse) => usePermissionStore.getState().respondToPermission(sessionId, requestId, response),
                 clearError: () => useSessionManagementStore.getState().clearError(),
                 getSessionsByDirectory: (directory: string) => useSessionManagementStore.getState().getSessionsByDirectory(directory),
                 getDirectoryForSession: (sessionId: string) => useSessionManagementStore.getState().getDirectoryForSession(sessionId),

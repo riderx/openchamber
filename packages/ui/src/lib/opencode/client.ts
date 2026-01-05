@@ -13,6 +13,7 @@ import type {
   FilePartInput,
   Event,
 } from "@opencode-ai/sdk/v2";
+import type { PermissionRequest } from "@/types/permission";
 type StreamEvent<TData> = {
   data: TData;
   event?: string;
@@ -739,19 +740,44 @@ class OpencodeService {
     return this.getSessionStatusForDirectory(null);
   }
 
+  // Tools
+  async listToolIds(options?: { directory?: string | null }): Promise<string[]> {
+    try {
+      const directory = typeof options?.directory === 'string'
+        ? options.directory.trim()
+        : (this.currentDirectory ? this.currentDirectory.trim() : '');
+
+      const result = await this.client.tool.ids(directory ? { directory } : undefined);
+      const tools = (result.data || []) as unknown as string[];
+      return tools.filter((tool) => typeof tool === 'string' && tool !== 'invalid');
+    } catch {
+      return [];
+    }
+  }
+
   // Permissions
-  async respondToPermission(
-    sessionId: string,
-    permissionId: string,
-    response: 'once' | 'always' | 'reject'
+  async replyToPermission(
+    requestId: string,
+    reply: 'once' | 'always' | 'reject',
+    options?: { message?: string }
   ): Promise<boolean> {
-    const result = await this.client.permission.respond({
-      sessionID: sessionId,
-      permissionID: permissionId,
+    const result = await this.client.permission.reply({
+      requestID: requestId,
       ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
-      response
+      reply,
+      ...(options?.message ? { message: options.message } : {}),
     });
     return result.data || false;
+  }
+
+  async listPendingPermissions(): Promise<PermissionRequest[]> {
+    try {
+      // Permission requests are global across sessions; do not scope by directory.
+      const result = await this.client.permission.list();
+      return (result.data || []) as unknown as PermissionRequest[];
+    } catch {
+      return [];
+    }
   }
 
   // Configuration

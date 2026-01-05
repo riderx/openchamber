@@ -144,13 +144,15 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ onClose, forceMobile
   const showTabLabels = containerWidth === 0 || containerWidth >= TAB_LABELS_MIN_WIDTH;
 
   React.useEffect(() => {
+    // Force reload when activeProject changes to ensure scopes update
     if (activeTab === 'agents') {
-      void useAgentsStore.getState().loadAgents();
+      // Small delay to allow store state to propagate if needed
+      setTimeout(() => void useAgentsStore.getState().loadAgents(), 0);
       return;
     }
 
     if (activeTab === 'commands') {
-      void useCommandsStore.getState().loadCommands();
+      setTimeout(() => void useCommandsStore.getState().loadCommands(), 0);
       return;
     }
 

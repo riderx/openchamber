@@ -1345,7 +1345,12 @@ async fn handle_agent_route(
         Method::GET => {
             match opencode_config::get_agent_sources(&name, Some(&working_directory)).await {
                 Ok(sources) => {
-                    let scope = sources.md.scope.clone().map(|s| match s {
+                    let resolved_scope = if sources.md.exists {
+                        sources.md.scope.clone()
+                    } else {
+                        sources.json.scope.clone()
+                    };
+                    let scope = resolved_scope.map(|s| match s {
                         opencode_config::Scope::User => opencode_config::CommandScope::User,
                         opencode_config::Scope::Project => opencode_config::CommandScope::Project,
                     });
@@ -1871,7 +1876,12 @@ async fn handle_command_route(
         Method::GET => {
             match opencode_config::get_command_sources(&name, Some(&working_directory)).await {
                 Ok(sources) => {
-                    let scope = sources.md.scope.clone().map(|s| match s {
+                    let resolved_scope = if sources.md.exists {
+                        sources.md.scope.clone()
+                    } else {
+                        sources.json.scope.clone()
+                    };
+                    let scope = resolved_scope.map(|s| match s {
                         opencode_config::Scope::User => opencode_config::CommandScope::User,
                         opencode_config::Scope::Project => opencode_config::CommandScope::Project,
                     });

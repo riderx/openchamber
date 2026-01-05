@@ -370,8 +370,29 @@ const handleLocalApiRequest = async (url: URL, init?: RequestInit) => {
     const name = decodeURIComponent(encodedName);
     const verb = ((init?.method || 'GET') as string).toUpperCase();
     const body = init?.body ? JSON.parse(init.body as string) : {};
+    const queryDirectory = url.searchParams.get('directory') || undefined;
+    const headerDirectory = (() => {
+      const headers = init?.headers;
+      if (!headers) return undefined;
+      if (headers instanceof Headers) {
+        return headers.get('x-opencode-directory') || undefined;
+      }
+      if (Array.isArray(headers)) {
+        const found = headers.find(([key]) => key.toLowerCase() === 'x-opencode-directory');
+        return found?.[1] || undefined;
+      }
+      if (typeof headers === 'object') {
+        for (const [key, value] of Object.entries(headers)) {
+          if (key.toLowerCase() === 'x-opencode-directory' && typeof value === 'string') {
+            return value;
+          }
+        }
+      }
+      return undefined;
+    })();
+    const directory = queryDirectory || headerDirectory;
     try {
-      const data = await sendBridgeMessage('api:config/agents', { method: verb, name, body });
+      const data = await sendBridgeMessage('api:config/agents', { method: verb, name, body, directory });
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -384,8 +405,29 @@ const handleLocalApiRequest = async (url: URL, init?: RequestInit) => {
     const name = decodeURIComponent(encodedName);
     const verb = ((init?.method || 'GET') as string).toUpperCase();
     const body = init?.body ? JSON.parse(init.body as string) : {};
+    const queryDirectory = url.searchParams.get('directory') || undefined;
+    const headerDirectory = (() => {
+      const headers = init?.headers;
+      if (!headers) return undefined;
+      if (headers instanceof Headers) {
+        return headers.get('x-opencode-directory') || undefined;
+      }
+      if (Array.isArray(headers)) {
+        const found = headers.find(([key]) => key.toLowerCase() === 'x-opencode-directory');
+        return found?.[1] || undefined;
+      }
+      if (typeof headers === 'object') {
+        for (const [key, value] of Object.entries(headers)) {
+          if (key.toLowerCase() === 'x-opencode-directory' && typeof value === 'string') {
+            return value;
+          }
+        }
+      }
+      return undefined;
+    })();
+    const directory = queryDirectory || headerDirectory;
     try {
-      const data = await sendBridgeMessage('api:config/commands', { method: verb, name, body });
+      const data = await sendBridgeMessage('api:config/commands', { method: verb, name, body, directory });
       return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -618,14 +618,16 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       }
 
       case 'api:config/agents': {
-        const { method, name, body } = (payload || {}) as { method?: string; name?: string; body?: Record<string, unknown> };
+        const { method, name, body, directory } = (payload || {}) as { method?: string; name?: string; body?: Record<string, unknown>; directory?: string };
         const agentName = typeof name === 'string' ? name.trim() : '';
         if (!agentName) {
           return { id, type, success: false, error: 'Agent name is required' };
         }
 
-        // Get working directory for project-level agent support
-        const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        // Use directory from request if provided, otherwise fall back to workspace
+        const workingDirectory = (typeof directory === 'string' && directory.trim())
+          ? directory.trim()
+          : (ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
 
         const normalizedMethod = typeof method === 'string' && method.trim() ? method.trim().toUpperCase() : 'GET';
         if (normalizedMethod === 'GET') {
@@ -696,14 +698,16 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
       }
 
       case 'api:config/commands': {
-        const { method, name, body } = (payload || {}) as { method?: string; name?: string; body?: Record<string, unknown> };
+        const { method, name, body, directory } = (payload || {}) as { method?: string; name?: string; body?: Record<string, unknown>; directory?: string };
         const commandName = typeof name === 'string' ? name.trim() : '';
         if (!commandName) {
           return { id, type, success: false, error: 'Command name is required' };
         }
 
-        // Get working directory for project-level command support
-        const workingDirectory = ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+        // Use directory from request if provided, otherwise fall back to workspace
+        const workingDirectory = (typeof directory === 'string' && directory.trim())
+          ? directory.trim()
+          : (ctx?.manager?.getWorkingDirectory() || vscode.workspace.workspaceFolders?.[0]?.uri.fsPath);
 
         const normalizedMethod = typeof method === 'string' && method.trim() ? method.trim().toUpperCase() : 'GET';
         if (normalizedMethod === 'GET') {

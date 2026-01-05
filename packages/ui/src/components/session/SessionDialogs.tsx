@@ -226,6 +226,21 @@ export const SessionDialogs: React.FC = () => {
         loadSessions();
     }, [loadSessions, currentDirectory]);
 
+    const projectsKey = React.useMemo(
+        () => projects.map((project) => `${project.id}:${project.path}`).join('|'),
+        [projects],
+    );
+    const lastProjectsKeyRef = React.useRef(projectsKey);
+
+    React.useEffect(() => {
+        if (projectsKey === lastProjectsKeyRef.current) {
+            return;
+        }
+
+        lastProjectsKeyRef.current = projectsKey;
+        loadSessions();
+    }, [loadSessions, projectsKey]);
+
     React.useEffect(() => {
         if (hasShownInitialDirectoryPrompt || !isHomeReady || projects.length > 0) {
             return;
