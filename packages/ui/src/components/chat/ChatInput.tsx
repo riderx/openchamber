@@ -30,6 +30,7 @@ import { toast } from 'sonner';
 import { useFileStore } from '@/stores/fileStore';
 import { calculateEditPermissionUIState, type BashPermissionSetting } from '@/lib/permissions/editPermissionDefaults';
 import { isVSCodeRuntime } from '@/lib/desktop';
+import { isIMECompositionEvent } from '@/lib/ime';
 import {
     DropdownMenu,
     DropdownMenuContent,
@@ -46,16 +47,6 @@ interface ChatInputProps {
 }
 
 const isPrimaryMode = (mode?: string) => mode === 'primary' || mode === 'all' || mode === undefined || mode === null;
-
-/**
- * Detects if a keyboard event is part of IME composition.
- * Uses both isComposing and keyCode === 229 (MDN recommended).
- * WebKit may fire compositionend before keydown, causing isComposing to be false
- * while keyCode remains 229, so both checks are needed.
- */
-const isIMECompositionEvent = (e: React.KeyboardEvent): boolean => {
-    return e.nativeEvent.isComposing || e.nativeEvent.keyCode === 229;
-};
 
 type PermissionAction = 'allow' | 'ask' | 'deny';
 type PermissionRule = { permission: string; pattern: string; action: PermissionAction };
@@ -590,7 +581,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
         }
 
         // Handle Enter/Ctrl+Enter based on queue mode
-        if (e.key === 'Enter' && !e.shiftKey && !isMobile && !isIMECompositionEvent(e)) {
+        if (e.key === 'Enter' && !e.shiftKey && !isMobile) {
             e.preventDefault();
             
             const isCtrlEnter = e.ctrlKey || e.metaKey;
