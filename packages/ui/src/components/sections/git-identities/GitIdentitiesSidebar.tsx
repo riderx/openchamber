@@ -17,6 +17,7 @@ import {
   RiGraduationCapLine,
   RiCodeLine,
   RiHeartLine,
+  RiStarFill,
 } from '@remixicon/react';
 import { useGitIdentitiesStore } from '@/stores/useGitIdentitiesStore';
 import { useUIStore } from '@/stores/useUIStore';
@@ -50,6 +51,7 @@ interface GitIdentitiesSidebarProps {
 export const GitIdentitiesSidebar: React.FC<GitIdentitiesSidebarProps> = ({ onItemSelect }) => {
   const {
     selectedProfileId,
+    defaultProfileId,
     profiles,
     globalIdentity,
     setSelectedProfile,
@@ -130,6 +132,7 @@ export const GitIdentitiesSidebar: React.FC<GitIdentitiesSidebarProps> = ({ onIt
               <ProfileListItem
                 profile={globalIdentity}
                 isSelected={selectedProfileId === 'global'}
+                isDefaultProfile={defaultProfileId === 'global' || (!defaultProfileId && !profiles.some(p => p.isDefault))}
                 onSelect={() => {
                   setSelectedProfile('global');
                   onItemSelect?.();
@@ -163,6 +166,7 @@ export const GitIdentitiesSidebar: React.FC<GitIdentitiesSidebarProps> = ({ onIt
                   key={profile.id}
                   profile={profile}
                   isSelected={selectedProfileId === profile.id}
+                  isDefaultProfile={defaultProfileId === profile.id || (!!profile.isDefault && !defaultProfileId)}
                   onSelect={() => {
                     setSelectedProfile(profile.id);
                     onItemSelect?.();
@@ -183,6 +187,7 @@ export const GitIdentitiesSidebar: React.FC<GitIdentitiesSidebarProps> = ({ onIt
 interface ProfileListItemProps {
   profile: GitIdentityProfile;
   isSelected: boolean;
+  isDefaultProfile: boolean;
   onSelect: () => void;
   onDelete?: () => void;
   isReadOnly?: boolean;
@@ -191,6 +196,7 @@ interface ProfileListItemProps {
 const ProfileListItem: React.FC<ProfileListItemProps> = ({
   profile,
   isSelected,
+  isDefaultProfile,
   onSelect,
   onDelete,
   isReadOnly = false,
@@ -219,6 +225,11 @@ const ProfileListItem: React.FC<ProfileListItemProps> = ({
             <span className="typography-ui-label font-normal truncate flex-1 text-foreground">
               {profile.name}
             </span>
+            {isDefaultProfile && (
+              <span title="Default identity">
+                <RiStarFill className="w-3 h-3 flex-shrink-0 text-amber-500" />
+              </span>
+            )}
           </div>
 
           <div className="typography-micro text-muted-foreground/60 truncate leading-tight">
