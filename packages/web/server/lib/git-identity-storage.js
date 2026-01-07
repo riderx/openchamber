@@ -68,8 +68,14 @@ export function createProfile(profileData) {
     userEmail: profileData.userEmail,
     sshKey: profileData.sshKey || null,
     color: profileData.color || 'keyword',
-    icon: profileData.icon || 'branch'
+    icon: profileData.icon || 'branch',
+    isDefault: profileData.isDefault || false
   };
+
+  // If this profile is set as default, unset default on all other profiles
+  if (newProfile.isDefault) {
+    profiles.forEach(p => { p.isDefault = false; });
+  }
 
   profiles.push(newProfile);
   saveProfiles({ profiles });
@@ -85,6 +91,15 @@ export function updateProfile(id, updates) {
     throw new Error(`Profile with ID "${id}" not found`);
   }
 
+  // If this profile is being set as default, unset default on all other profiles
+  if (updates.isDefault === true) {
+    profiles.forEach((p, i) => {
+      if (i !== index) {
+        p.isDefault = false;
+      }
+    });
+  }
+
   profiles[index] = {
     ...profiles[index],
     ...updates,
@@ -93,6 +108,11 @@ export function updateProfile(id, updates) {
 
   saveProfiles({ profiles });
   return profiles[index];
+}
+
+export function getDefaultProfile() {
+  const profiles = getProfiles();
+  return profiles.find(p => p.isDefault === true) || null;
 }
 
 export function deleteProfile(id) {

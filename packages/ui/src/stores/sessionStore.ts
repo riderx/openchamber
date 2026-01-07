@@ -8,8 +8,9 @@ import { archiveWorktree, getWorktreeStatus, listWorktrees, mapWorktreeToMetadat
 import { useDirectoryStore } from "./useDirectoryStore";
 import { useProjectsStore } from "./useProjectsStore";
 import type { ProjectEntry } from "@/lib/api/types";
-import { checkIsGitRepository } from "@/lib/gitApi";
+import { checkIsGitRepository, setGitIdentity } from "@/lib/gitApi";
 import { streamDebugEnabled } from "@/stores/utils/streamDebug";
+import { useGitIdentitiesStore } from "./useGitIdentitiesStore";
 
 interface SessionState {
     sessions: Session[];
@@ -1309,10 +1310,23 @@ export const useSessionStore = create<SessionStore>()(
                 },
 
                 initializeNewOpenChamberSession: (sessionId: string) => {
-                    const { markSessionAsOpenChamberCreated } = get();
+                    const { markSessionAsOpenChamberCreated, sessions } = get();
 
                     markSessionAsOpenChamberCreated(sessionId);
 
+                    // Apply default git identity if one is set (skip if it's the global identity, which is already the git default)
+                    const session = sessions.find(s => s.id === sessionId);
+                    const directory = session?.directory;
+                    if (directory) {
+                        const gitIdentitiesStore = useGitIdentitiesStore.getState();
+                        const defaultProfile = gitIdentitiesStore.getDefaultProfile();
+                        // Only apply if it's a custom profile (not 'global')
+                        if (defaultProfile && defaultProfile.id !== 'global') {
+                            setGitIdentity(directory, defaultProfile.id).catch((err) => {
+                                console.warn("Failed to apply default git identity to session:", err);
+                            });
+                        }
+                    }
                 },
 
                 setWorktreeMetadata: (sessionId: string, metadata: WorktreeMetadata | null) => {

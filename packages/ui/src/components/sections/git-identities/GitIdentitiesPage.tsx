@@ -56,6 +56,7 @@ export const GitIdentitiesPage: React.FC = () => {
   const [sshKey, setSshKey] = React.useState('');
   const [color, setColor] = React.useState('keyword');
   const [icon, setIcon] = React.useState('branch');
+  const [isDefault, setIsDefault] = React.useState(false);
   const [isSaving, setIsSaving] = React.useState(false);
 
   React.useEffect(() => {
@@ -67,6 +68,7 @@ export const GitIdentitiesPage: React.FC = () => {
       setSshKey('');
       setColor('keyword');
       setIcon('branch');
+      setIsDefault(false);
     } else if (selectedProfile) {
 
       setName(selectedProfile.name);
@@ -75,6 +77,7 @@ export const GitIdentitiesPage: React.FC = () => {
       setSshKey(selectedProfile.sshKey || '');
       setColor(selectedProfile.color || 'keyword');
       setIcon(selectedProfile.icon || 'branch');
+      setIsDefault(selectedProfile.isDefault || false);
     }
   }, [selectedProfile, isNewProfile, selectedProfileId]);
 
@@ -94,6 +97,7 @@ export const GitIdentitiesPage: React.FC = () => {
         sshKey: sshKey.trim() || null,
         color,
         icon,
+        isDefault,
       };
 
       let success: boolean;
@@ -248,6 +252,23 @@ export const GitIdentitiesPage: React.FC = () => {
                 })}
               </div>
             </div>
+          </div>
+
+          <div className="space-y-2">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                className="h-3.5 w-3.5 accent-primary"
+                checked={isDefault}
+                onChange={(e) => setIsDefault(e.target.checked)}
+              />
+              <span className="typography-ui-label font-medium text-foreground">
+                Set as default identity
+              </span>
+            </label>
+            <p className="typography-meta text-muted-foreground">
+              When enabled, this identity will be used by default for new sessions
+            </p>
           </div>
         </div>
         )}

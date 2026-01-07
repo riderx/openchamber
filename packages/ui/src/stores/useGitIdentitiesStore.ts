@@ -18,11 +18,13 @@ export interface GitIdentityProfile {
   sshKey?: string | null;
   color?: string | null;
   icon?: string | null;
+  isDefault?: boolean;
 }
 
 interface GitIdentitiesStore {
 
   selectedProfileId: string | null;
+  defaultProfileId: string | null; // 'global' for system identity, profile id for custom, null for none
   profiles: GitIdentityProfile[];
   globalIdentity: GitIdentityProfile | null;
   isLoading: boolean;
@@ -34,6 +36,9 @@ interface GitIdentitiesStore {
   updateProfile: (id: string, updates: Partial<GitIdentityProfile>) => Promise<boolean>;
   deleteProfile: (id: string) => Promise<boolean>;
   getProfileById: (id: string) => GitIdentityProfile | undefined;
+  getDefaultProfile: () => GitIdentityProfile | undefined;
+  setDefaultProfile: (id: string | null) => Promise<boolean>;
+  clearDefaultProfile: () => Promise<boolean>;
 }
 
 declare global {
@@ -48,6 +53,7 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
       (set, get) => ({
 
         selectedProfileId: null,
+        defaultProfileId: 'global', // Default to global identity initially
         profiles: [],
         globalIdentity: null,
         isLoading: false,
@@ -160,12 +166,88 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
           }
           return profiles.find((p) => p.id === id);
         },
+
+        getDefaultProfile: () => {
+          const { profiles, globalIdentity, defaultProfileId } = get();
+
+          // If defaultProfileId is set, use it
+          if (defaultProfileId === 'global') {
+            return globalIdentity || undefined;
+          }
+
+          if (defaultProfileId) {
+            const profile = profiles.find((p) => p.id === defaultProfileId);
+            if (profile) return profile;
+          }
+
+          // Fallback: check if any profile has isDefault flag from backend
+          const backendDefault = profiles.find((p) => p.isDefault === true);
+          if (backendDefault) return backendDefault;
+
+          // Final fallback: return global identity if available
+          return globalIdentity || undefined;
+        },
+
+        setDefaultProfile: async (id) => {
+          try {
+            if (id === null) {
+              // Clear default - delegate to clearDefaultProfile
+              return get().clearDefaultProfile();
+            }
+
+            if (id === 'global') {
+              // Setting global as default - just update local state
+              // Also clear isDefault on any custom profiles
+              const { profiles } = get();
+              for (const profile of profiles) {
+                if (profile.isDefault) {
+                  await updateGitIdentity(profile.id, { ...profile, isDefault: false });
+                }
+              }
+              set({ defaultProfileId: 'global' });
+              await get().loadProfiles();
+              return true;
+            }
+
+            const profile = get().profiles.find(p => p.id === id);
+            if (!profile) {
+              throw new Error("Profile not found");
+            }
+            // Setting isDefault to true will automatically unset other defaults on the backend
+            await updateGitIdentity(id, { ...profile, isDefault: true });
+            set({ defaultProfileId: id });
+            await get().loadProfiles();
+            return true;
+          } catch (error) {
+            console.error("Failed to set default git identity profile:", error);
+            return false;
+          }
+        },
+
+        clearDefaultProfile: async () => {
+          try {
+            const { profiles } = get();
+            // Clear isDefault on any custom profiles
+            for (const profile of profiles) {
+              if (profile.isDefault) {
+                await updateGitIdentity(profile.id, { ...profile, isDefault: false });
+              }
+            }
+            set({ defaultProfileId: null });
+            await get().loadProfiles();
+            return true;
+          } catch (error) {
+            console.error("Failed to clear default git identity profile:", error);
+            return false;
+          }
+        },
       }),
       {
         name: "git-identities-store",
         storage: createJSONStorage(() => getSafeStorage()),
         partialize: (state) => ({
           selectedProfileId: state.selectedProfileId,
+          defaultProfileId: state.defaultProfileId,
         }),
       },
     ),

@@ -176,6 +176,7 @@ export interface GitIdentityProfile {
   sshKey?: string | null;
   color?: string | null;
   icon?: string | null;
+  isDefault?: boolean;
 }
 
 export interface GitIdentitySummary {
