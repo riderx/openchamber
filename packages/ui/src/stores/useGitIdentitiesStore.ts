@@ -9,6 +9,8 @@ import {
   deleteGitIdentity,
   getCurrentGitIdentity
 } from "@/lib/gitApi";
+import { getDesktopSettings, updateDesktopSettings, isDesktopRuntime } from "@/lib/desktop";
+import { getRegisteredRuntimeAPIs } from "@/contexts/runtimeAPIRegistry";
 
 export interface GitIdentityProfile {
   id: string;
@@ -32,6 +34,7 @@ interface GitIdentitiesStore {
   setSelectedProfile: (id: string | null) => void;
   loadProfiles: () => Promise<boolean>;
   loadGlobalIdentity: () => Promise<boolean>;
+  loadDefaultProfileId: () => Promise<boolean>;
   createProfile: (profile: Omit<GitIdentityProfile, 'id'> & { id?: string }) => Promise<boolean>;
   updateProfile: (id: string, updates: Partial<GitIdentityProfile>) => Promise<boolean>;
   deleteProfile: (id: string) => Promise<boolean>;
@@ -100,6 +103,55 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
           } catch (error) {
             console.error("Failed to load global git identity:", error);
             set({ globalIdentity: null });
+            return false;
+          }
+        },
+
+        loadDefaultProfileId: async () => {
+          try {
+            let defaultId: string | null = null;
+
+            // 1. Desktop runtime (Tauri)
+            if (isDesktopRuntime()) {
+              const settings = await getDesktopSettings();
+              defaultId = settings?.defaultGitIdentityId ?? null;
+            } else {
+              // 2. Runtime settings API (VSCode)
+              const runtimeSettings = getRegisteredRuntimeAPIs()?.settings;
+              if (runtimeSettings) {
+                try {
+                  const result = await runtimeSettings.load();
+                  const settings = result?.settings;
+                  if (settings && typeof settings.defaultGitIdentityId === 'string') {
+                    defaultId = settings.defaultGitIdentityId;
+                  }
+                } catch {
+                  // Fall through to fetch
+                }
+              }
+
+              // 3. Fetch API (Web)
+              if (defaultId === null) {
+                try {
+                  const response = await fetch('/api/config/settings', {
+                    method: 'GET',
+                    headers: { Accept: 'application/json' },
+                  });
+                  if (response.ok) {
+                    const data = await response.json();
+                    defaultId = data.defaultGitIdentityId ?? null;
+                  }
+                } catch {
+                  // Ignore fetch errors
+                }
+              }
+            }
+
+            // Default to 'global' if not set
+            set({ defaultProfileId: defaultId ?? 'global' });
+            return true;
+          } catch (error) {
+            console.error("Failed to load default git identity id:", error);
             return false;
           }
         },
@@ -196,25 +248,25 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
             }
 
             if (id === 'global') {
-              // Setting global as default - just update local state
-              // Also clear isDefault on any custom profiles
+              // Setting global as default - clear isDefault on any custom profiles
               const { profiles } = get();
               for (const profile of profiles) {
                 if (profile.isDefault) {
                   await updateGitIdentity(profile.id, { ...profile, isDefault: false });
                 }
               }
-              set({ defaultProfileId: 'global' });
-              await get().loadProfiles();
-              return true;
+            } else {
+              const profile = get().profiles.find(p => p.id === id);
+              if (!profile) {
+                throw new Error("Profile not found");
+              }
+              // Setting isDefault to true will automatically unset other defaults on the backend
+              await updateGitIdentity(id, { ...profile, isDefault: true });
             }
 
-            const profile = get().profiles.find(p => p.id === id);
-            if (!profile) {
-              throw new Error("Profile not found");
-            }
-            // Setting isDefault to true will automatically unset other defaults on the backend
-            await updateGitIdentity(id, { ...profile, isDefault: true });
+            // Save to desktop settings
+            await updateDesktopSettings({ defaultGitIdentityId: id });
+
             set({ defaultProfileId: id });
             await get().loadProfiles();
             return true;
@@ -233,6 +285,10 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
                 await updateGitIdentity(profile.id, { ...profile, isDefault: false });
               }
             }
+
+            // Save to desktop settings (empty string to clear)
+            await updateDesktopSettings({ defaultGitIdentityId: '' });
+
             set({ defaultProfileId: null });
             await get().loadProfiles();
             return true;
@@ -247,7 +303,7 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
         storage: createJSONStorage(() => getSafeStorage()),
         partialize: (state) => ({
           selectedProfileId: state.selectedProfileId,
-          defaultProfileId: state.defaultProfileId,
+          // defaultProfileId is now stored in desktop settings, not localStorage
         }),
       },
     ),

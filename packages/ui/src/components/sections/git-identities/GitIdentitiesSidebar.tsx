@@ -58,6 +58,7 @@ export const GitIdentitiesSidebar: React.FC<GitIdentitiesSidebarProps> = ({ onIt
     deleteProfile,
     loadProfiles,
     loadGlobalIdentity,
+    loadDefaultProfileId,
   } = useGitIdentitiesStore();
 
   const { setSidebarOpen } = useUIStore();
@@ -78,7 +79,8 @@ export const GitIdentitiesSidebar: React.FC<GitIdentitiesSidebarProps> = ({ onIt
   React.useEffect(() => {
     loadProfiles();
     loadGlobalIdentity();
-  }, [loadProfiles, loadGlobalIdentity]);
+    loadDefaultProfileId();
+  }, [loadProfiles, loadGlobalIdentity, loadDefaultProfileId]);
 
   const bgClass = isDesktopRuntime
     ? 'bg-transparent'
