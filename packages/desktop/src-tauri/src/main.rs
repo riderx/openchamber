@@ -28,9 +28,9 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
-use commands::files::{create_directory, list_directory, search_files};
+use commands::files::{create_directory, exec_commands, list_directory, read_file, search_files, write_file};
 use commands::git::{
-    add_git_worktree, check_is_git_repository, checkout_branch, create_branch, create_git_commit,
+    add_git_worktree, check_is_git_repository, checkout_branch, create_branch, create_git_commit, rename_branch,
     create_git_identity, delete_git_branch, delete_git_identity, delete_remote_branch,
     ensure_openchamber_ignored, generate_commit_message, get_commit_files,
     get_current_git_identity, get_git_branches, get_git_diff, get_git_file_diff,
@@ -835,6 +835,9 @@ fn main() {
             list_directory,
             search_files,
             create_directory,
+            read_file,
+            write_file,
+            exec_commands,
             request_directory_access,
             start_accessing_directory,
             stop_accessing_directory,
@@ -860,6 +863,7 @@ fn main() {
             git_fetch,
             checkout_branch,
             create_branch,
+            rename_branch,
             get_git_log,
             get_commit_files,
             get_git_identities,

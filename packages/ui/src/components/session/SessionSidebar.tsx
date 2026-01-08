@@ -24,15 +24,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
-import { Button } from '@/components/ui/button';
+
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip';
 import {
@@ -44,7 +36,8 @@ import {
   RiDeleteBinLine,
   RiErrorWarningLine,
   RiFileCopyLine,
-  RiGitRepositoryLine,
+  RiFolderAddLine,
+  RiGitBranchLine,
   RiLinkUnlinkM,
   RiMore2Line,
   RiPencilAiLine,
@@ -58,12 +51,13 @@ import { useSessionStore } from '@/stores/useSessionStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import { useProjectsStore } from '@/stores/useProjectsStore';
 import { useUIStore } from '@/stores/useUIStore';
+import { useConfigStore } from '@/stores/useConfigStore';
 import type { WorktreeMetadata } from '@/types/worktree';
 import { opencodeClient } from '@/lib/opencode/client';
 import { checkIsGitRepository } from '@/lib/gitApi';
 import { getSafeStorage } from '@/stores/utils/safeStorage';
+import { createWorktreeSession } from '@/lib/worktreeSessionCreator';
 
-const GROUP_COLLAPSE_STORAGE_KEY = 'oc.sessions.groupCollapse';
 const PROJECT_COLLAPSE_STORAGE_KEY = 'oc.sessions.projectCollapse';
 const SESSION_EXPANDED_STORAGE_KEY = 'oc.sessions.expandedParents';
 
@@ -110,6 +104,7 @@ const formatProjectLabel = (label: string): string => {
 type SessionNode = {
   session: Session;
   children: SessionNode[];
+  worktree: WorktreeMetadata | null;
 };
 
 type SessionGroup = {
@@ -136,7 +131,7 @@ interface SortableProjectItemProps {
   mobileVariant: boolean;
   onToggle: () => void;
   onHoverChange: (hovered: boolean) => void;
-  onOpenWorktreeManager: () => void;
+  onNewSession: () => void;
   onOpenMultiRunLauncher: () => void;
   onClose: () => void;
   sentinelRef: (el: HTMLDivElement | null) => void;
@@ -157,7 +152,7 @@ const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
   mobileVariant,
   onToggle,
   onHoverChange,
-  onOpenWorktreeManager,
+  onNewSession,
   onOpenMultiRunLauncher,
   onClose,
   sentinelRef,
@@ -241,16 +236,10 @@ const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" className="min-w-[180px]">
               {isRepo && !hideDirectoryControls && (
-                <>
-                  <DropdownMenuItem onClick={onOpenWorktreeManager}>
-                    <RiGitRepositoryLine className="mr-1.5 h-4 w-4" />
-                    Manage Worktrees
-                  </DropdownMenuItem>
-                  <DropdownMenuItem onClick={onOpenMultiRunLauncher}>
-                    <ArrowsMerge className="mr-1.5 h-4 w-4" />
-                    New Multi-Run
-                  </DropdownMenuItem>
-                </>
+                <DropdownMenuItem onClick={onOpenMultiRunLauncher}>
+                  <ArrowsMerge className="mr-1.5 h-4 w-4" />
+                  New Multi-Run
+                </DropdownMenuItem>
               )}
               <DropdownMenuItem
                 onClick={onClose}
@@ -262,18 +251,17 @@ const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          {/* Collapse arrow */}
+          {/* New session button */}
           <button
             type="button"
-            onClick={onToggle}
-            className="inline-flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-foreground flex-shrink-0"
-            aria-label={isCollapsed ? 'Expand project' : 'Collapse project'}
+            onClick={(e) => {
+              e.stopPropagation();
+              onNewSession();
+            }}
+            className="inline-flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-foreground flex-shrink-0 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+            aria-label="New session"
           >
-            {isCollapsed ? (
-              <RiArrowRightSLine className="h-4 w-4" />
-            ) : (
-              <RiArrowDownSLine className="h-4 w-4" />
-            )}
+            <RiAddLine className="h-4 w-4" />
           </button>
         </div>
       </div>
@@ -288,13 +276,11 @@ const SortableProjectItem: React.FC<SortableProjectItemProps> = ({
 interface ProjectDragOverlayProps {
   projectLabel: string;
   isActiveProject: boolean;
-  isCollapsed: boolean;
 }
 
 const ProjectDragOverlay: React.FC<ProjectDragOverlayProps> = ({
   projectLabel,
   isActiveProject,
-  isCollapsed,
 }) => {
   return (
     <div
@@ -309,11 +295,7 @@ const ProjectDragOverlay: React.FC<ProjectDragOverlayProps> = ({
           {projectLabel}
         </span>
         <span className="inline-flex h-6 w-6 items-center justify-center text-muted-foreground ml-auto">
-          {isCollapsed ? (
-            <RiArrowRightSLine className="h-4 w-4" />
-          ) : (
-            <RiArrowDownSLine className="h-4 w-4" />
-          )}
+          <RiAddLine className="h-4 w-4" />
         </span>
       </div>
     </div>
@@ -345,20 +327,13 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   );
   const checkingDirectories = React.useRef<Set<string>>(new Set());
   const safeStorage = React.useMemo(() => getSafeStorage(), []);
-  const [collapsedGroups, setCollapsedGroups] = React.useState<Set<string>>(new Set());
   const [collapsedProjects, setCollapsedProjects] = React.useState<Set<string>>(new Set());
-  const [pendingProjectClose, setPendingProjectClose] = React.useState<{
-    id: string;
-    label: string;
-  } | null>(null);
+
   const [projectRepoStatus, setProjectRepoStatus] = React.useState<Map<string, boolean | null>>(new Map());
   const [expandedSessionGroups, setExpandedSessionGroups] = React.useState<Set<string>>(new Set());
-  const [hoveredGroupId, setHoveredGroupId] = React.useState<string | null>(null);
   const [hoveredProjectId, setHoveredProjectId] = React.useState<string | null>(null);
   const [activeDragId, setActiveDragId] = React.useState<string | null>(null);
-  const [stuckHeaders, setStuckHeaders] = React.useState<Set<string>>(new Set());
   const [stuckProjectHeaders, setStuckProjectHeaders] = React.useState<Set<string>>(new Set());
-  const headerSentinelRefs = React.useRef<Map<string, HTMLDivElement | null>>(new Map());
   const projectHeaderSentinelRefs = React.useRef<Map<string, HTMLDivElement | null>>(new Map());
   const ignoreIntersectionUntil = React.useRef<number>(0);
 
@@ -377,6 +352,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const setActiveMainTab = useUIStore((state) => state.setActiveMainTab);
   const setSessionSwitcherOpen = useUIStore((state) => state.setSessionSwitcherOpen);
   const openMultiRunLauncher = useUIStore((state) => state.openMultiRunLauncher);
+
+  const settingsAutoCreateWorktree = useConfigStore((state) => state.settingsAutoCreateWorktree);
 
   const sessions = useSessionStore((state) => state.sessions);
   const sessionsByDirectory = useSessionStore((state) => state.sessionsByDirectory);
@@ -402,13 +379,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   React.useEffect(() => {
     try {
-      const storedGroups = safeStorage.getItem(GROUP_COLLAPSE_STORAGE_KEY);
-      if (storedGroups) {
-        const parsed = JSON.parse(storedGroups);
-        if (Array.isArray(parsed)) {
-          setCollapsedGroups(new Set(parsed.filter((item) => typeof item === 'string')));
-        }
-      }
       const storedParents = safeStorage.getItem(SESSION_EXPANDED_STORAGE_KEY);
       if (storedParents) {
         const parsed = JSON.parse(storedParents);
@@ -709,6 +679,40 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const handleDeleteSession = React.useCallback(
     async (session: Session) => {
       const descendants = collectDescendants(session.id);
+      
+      // Check if this is a worktree session - if so, show confirmation dialog
+      const worktree = worktreeMetadata.get(session.id);
+      if (worktree) {
+        // Find ALL sessions linked to this worktree (not just the triggered one)
+        const worktreePath = worktree.path;
+        const allWorktreeSessions: Session[] = [];
+        const sessionIdSet = new Set<string>();
+        
+        // Iterate through all sessions and find those linked to the same worktree
+        sessions.forEach((s) => {
+          const meta = worktreeMetadata.get(s.id);
+          if (meta && meta.path === worktreePath && !sessionIdSet.has(s.id)) {
+            allWorktreeSessions.push(s);
+            sessionIdSet.add(s.id);
+            // Also collect descendants of each worktree session
+            const sessionDescendants = collectDescendants(s.id);
+            sessionDescendants.forEach((desc) => {
+              if (!sessionIdSet.has(desc.id)) {
+                allWorktreeSessions.push(desc);
+                sessionIdSet.add(desc.id);
+              }
+            });
+          }
+        });
+
+        sessionEvents.requestDelete({
+          sessions: allWorktreeSessions,
+          mode: 'worktree',
+          worktree,
+        });
+        return;
+      }
+
       if (descendants.length === 0) {
 
         const success = await deleteSession(session.id);
@@ -729,31 +733,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         }
       }
     },
-    [collectDescendants, deleteSession, deleteSessions],
-  );
-
-  const handleCreateSessionInGroup = React.useCallback(
-    (directory: string | null, projectId?: string | null) => {
-      if (projectId && projectId !== activeProjectId) {
-        setActiveProject(projectId);
-      }
-      setActiveMainTab('chat');
-      if (mobileVariant) {
-        setSessionSwitcherOpen(false);
-      }
-      openNewSessionDraft({ directoryOverride: directory ?? null });
-    },
-    [activeProjectId, openNewSessionDraft, setActiveMainTab, setActiveProject, setSessionSwitcherOpen, mobileVariant],
-  );
-
-  const handleOpenWorktreeManager = React.useCallback(
-    (projectId?: string | null) => {
-      if (projectId && projectId !== activeProjectId) {
-        setActiveProjectIdOnly(projectId);
-      }
-      sessionEvents.requestCreate({ worktreeMode: 'create', projectId: projectId ?? null });
-    },
-    [activeProjectId, setActiveProjectIdOnly],
+    [collectDescendants, deleteSession, deleteSessions, worktreeMetadata, sessions],
   );
 
   const handleOpenDirectoryDialog = React.useCallback(() => {
@@ -783,21 +763,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     }
   }, [addProject, isDesktopRuntime]);
 
-  const confirmPendingProjectClose = React.useCallback(() => {
-    const pending = pendingProjectClose;
-    if (!pending) {
-      return;
-    }
-
-    removeProject(pending.id);
-    setPendingProjectClose(null);
-    toast.success('Project closed', { description: pending.label });
-  }, [pendingProjectClose, removeProject]);
-
-  const cancelPendingProjectClose = React.useCallback(() => {
-    setPendingProjectClose(null);
-  }, []);
-
   const toggleParent = React.useCallback((sessionId: string) => {
     setExpandedParents((prev) => {
       const next = new Set(prev);
@@ -819,15 +784,15 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       return {
         session,
         children: children.map((child) => buildNode(child)),
+        worktree: worktreeMetadata.get(session.id) ?? null,
       };
     },
-    [childrenMap],
+    [childrenMap, worktreeMetadata],
   );
 
 
   const buildGroupedSessions = React.useCallback(
     (projectSessions: Session[], projectRoot: string | null, availableWorktrees: WorktreeMetadata[]) => {
-      const groups = new Map<string, SessionGroup>();
       const normalizedProjectRoot = normalizePath(projectRoot ?? null);
       const sortedProjectSessions = [...projectSessions].sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0));
 
@@ -844,14 +809,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       });
       childrenMap.forEach((list) => list.sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0)));
 
-      const buildProjectNode = (session: Session): SessionNode => {
-        const children = childrenMap.get(session.id) ?? [];
-        return {
-          session,
-          children: children.map((child) => buildProjectNode(child)),
-        };
-      };
-
+      // Build worktree lookup map
       const worktreeByPath = new Map<string, WorktreeMetadata>();
       availableWorktrees.forEach((meta) => {
         if (meta.path) {
@@ -860,42 +818,31 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         }
       });
 
-      const ensureGroup = (session: Session) => {
+      // Helper to get worktree metadata for a session
+      const getSessionWorktree = (session: Session): WorktreeMetadata | null => {
         const sessionDirectory = normalizePath((session as Session & { directory?: string | null }).directory ?? null);
-
         const sessionWorktreeMeta = worktreeMetadata.get(session.id) ?? null;
-        const worktree =
-          sessionWorktreeMeta ??
-          (sessionDirectory ? worktreeByPath.get(sessionDirectory) ?? null : null);
-        const isMain =
-          !worktree &&
-          ((sessionDirectory && normalizedProjectRoot
-            ? sessionDirectory === normalizedProjectRoot
-            : !sessionDirectory && Boolean(normalizedProjectRoot)));
-        const key = isMain ? 'main' : worktree?.path ?? sessionDirectory ?? session.id;
-        const directory = worktree?.path ?? sessionDirectory ?? normalizedProjectRoot ?? null;
-        if (!groups.has(key)) {
-          const label = isMain
-            ? 'Main workspace'
-            : worktree?.label || worktree?.branch || formatDirectoryName(directory || '', homeDirectory) || 'Worktree';
-          const description = worktree?.relativePath
-            ? formatPathForDisplay(worktree.relativePath, homeDirectory)
-            : directory
-              ? formatPathForDisplay(directory, homeDirectory)
-              : null;
-          groups.set(key, {
-            id: key,
-            label,
-            description,
-            isMain,
-            worktree,
-            directory,
-            sessions: [],
-          });
+        if (sessionWorktreeMeta) return sessionWorktreeMeta;
+        if (sessionDirectory) {
+          const worktree = worktreeByPath.get(sessionDirectory) ?? null;
+          // Only count as worktree if it's not the main project root
+          if (worktree && sessionDirectory !== normalizedProjectRoot) {
+            return worktree;
+          }
         }
-        return groups.get(key)!;
+        return null;
       };
 
+      const buildProjectNode = (session: Session): SessionNode => {
+        const children = childrenMap.get(session.id) ?? [];
+        return {
+          session,
+          children: children.map((child) => buildProjectNode(child)),
+          worktree: getSessionWorktree(session),
+        };
+      };
+
+      // Find root sessions (no parent or parent not in current project)
       const roots = sortedProjectSessions.filter((session) => {
         const parentID = (session as Session & { parentID?: string | null }).parentID;
         if (!parentID) {
@@ -904,69 +851,22 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         return !sessionMap.has(parentID);
       });
 
-      roots.forEach((session) => {
-        const group = ensureGroup(session);
-        const node = buildProjectNode(session);
-        group.sessions.push(node);
-      });
+      // Build all session nodes into a single flat group sorted by date
+      const allSessions: SessionNode[] = roots.map((session) => buildProjectNode(session));
 
-      if (!groups.has('main')) {
-        groups.set('main', {
-          id: 'main',
-          label: 'Main workspace',
-          description: normalizedProjectRoot ? formatPathForDisplay(normalizedProjectRoot, homeDirectory) : null,
-          isMain: true,
-          worktree: null,
-          directory: normalizedProjectRoot,
-          sessions: [],
-        });
-      }
-
-      worktreeByPath.forEach((meta, path) => {
-        const key = meta.path;
-        if (!groups.has(key)) {
-          groups.set(key, {
-            id: key,
-            label: meta.label || meta.branch || formatDirectoryName(path, homeDirectory) || 'Worktree',
-            description: meta.relativePath
-              ? formatPathForDisplay(meta.relativePath, homeDirectory)
-              : formatPathForDisplay(path, homeDirectory),
-            isMain: false,
-            worktree: meta,
-            directory: path,
-            sessions: [],
-          });
-        }
-      });
-
-      groups.forEach((group) => {
-        group.sessions.sort((a, b) => (b.session.time?.created || 0) - (a.session.time?.created || 0));
-      });
-
-      return Array.from(groups.values()).sort((a, b) => {
-        if (a.isMain !== b.isMain) {
-          return a.isMain ? -1 : 1;
-        }
-        return (a.label || '').localeCompare(b.label || '');
-      });
+      // Return single group with all sessions
+      return [{
+        id: 'all',
+        label: 'All sessions',
+        description: normalizedProjectRoot ? formatPathForDisplay(normalizedProjectRoot, homeDirectory) : null,
+        isMain: true,
+        worktree: null,
+        directory: normalizedProjectRoot,
+        sessions: allSessions,
+      }];
     },
     [homeDirectory, worktreeMetadata]
   );
-
-  const toggleGroup = React.useCallback((groupId: string) => {
-    setCollapsedGroups((prev) => {
-      const next = new Set(prev);
-      if (next.has(groupId)) {
-        next.delete(groupId);
-      } else {
-        next.add(groupId);
-      }
-      try {
-        safeStorage.setItem(GROUP_COLLAPSE_STORAGE_KEY, JSON.stringify(Array.from(next)));
-      } catch { /* ignored */ }
-      return next;
-    });
-  }, [safeStorage]);
 
   const toggleGroupSessionLimit = React.useCallback((groupId: string) => {
     setExpandedSessionGroups((prev) => {
@@ -1051,47 +951,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       };
     });
   }, [normalizedProjects, getSessionsForProject, buildGroupedSessions, availableWorktreesByProject]);
-
-  // Track when sticky headers become "stuck" using sentinel elements
-  React.useEffect(() => {
-    if (!isDesktopRuntime) return;
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        // Ignore intersection events shortly after collapse/expand
-        if (Date.now() < ignoreIntersectionUntil.current) return;
-        
-        entries.forEach((entry) => {
-          const groupId = (entry.target as HTMLElement).dataset.groupId;
-          if (!groupId) return;
-          
-          setStuckHeaders((prev) => {
-            const next = new Set(prev);
-            // When sentinel is NOT intersecting, header is stuck
-            if (!entry.isIntersecting) {
-              next.add(groupId);
-            } else {
-              next.delete(groupId);
-            }
-            return next;
-          });
-        });
-      },
-      { threshold: 0, rootMargin: '-96px 0px 0px 0px' }
-    );
-
-    // Small delay to let DOM settle after collapse/expand
-    const timeoutId = setTimeout(() => {
-      headerSentinelRefs.current.forEach((el) => {
-        if (el) observer.observe(el);
-      });
-    }, 50);
-
-    return () => {
-      clearTimeout(timeoutId);
-      observer.disconnect();
-    };
-  }, [isDesktopRuntime, projectSections, collapsedProjects]);
 
   // Track when project sticky headers become "stuck"
   React.useEffect(() => {
@@ -1301,6 +1160,18 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                   {session.share ? (
                     <RiShare2Line className="h-3 w-3 text-[color:var(--status-info)] flex-shrink-0" />
                   ) : null}
+                  {node.worktree ? (
+                    <Tooltip delayDuration={700}>
+                      <TooltipTrigger asChild>
+                        <span className="flex-shrink-0">
+                          <RiGitBranchLine className="h-3 w-3 text-[color:var(--status-info)]" />
+                        </span>
+                      </TooltipTrigger>
+                      <TooltipContent side="top" className="text-xs">
+                        {node.worktree.branch || node.worktree.label || 'Worktree'}
+                      </TooltipContent>
+                    </Tooltip>
+                  ) : null}
                   {hasSummary && ((additions ?? 0) !== 0 || (deletions ?? 0) !== 0) ? (
                     <span className="flex-shrink-0 text-[0.7rem] leading-none">
                       <span className="text-[color:var(--status-success)]">+{Math.max(0, additions ?? 0)}</span>
@@ -1383,6 +1254,24 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                         </DropdownMenuItem>
                       </>
                     )}
+                    {node.worktree ? (
+                      <DropdownMenuItem
+                        onClick={() => {
+                          if (projectId && projectId !== activeProjectId) {
+                            setActiveProject(projectId);
+                          }
+                          setActiveMainTab('chat');
+                          if (mobileVariant) {
+                            setSessionSwitcherOpen(false);
+                          }
+                          openNewSessionDraft({ directoryOverride: node.worktree?.path ?? null });
+                        }}
+                        className="[&>svg]:mr-1"
+                      >
+                        <RiGitBranchLine className="mr-1 h-4 w-4" />
+                        New session in worktree
+                      </DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuItem
                       className="text-destructive focus:text-destructive [&>svg]:mr-1"
                       onClick={() => handleDeleteSession(session)}
@@ -1422,6 +1311,11 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       handleDeleteSession,
       copiedSessionId,
       mobileVariant,
+      activeProjectId,
+      setActiveProject,
+      setActiveMainTab,
+      setSessionSwitcherOpen,
+      openNewSessionDraft,
     ],
   );
 
@@ -1520,9 +1414,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
           || project.normalizedPath
       ),
       isActive: project.id === activeProjectId,
-      isCollapsed: collapsedProjects.has(project.id),
     };
-  }, [activeDragId, projectSections, homeDirectory, activeProjectId, collapsedProjects]);
+  }, [activeDragId, projectSections, homeDirectory, activeProjectId]);
 
   return (
     <div
@@ -1550,7 +1443,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
               aria-label="Add project"
               title="Add project"
             >
-              <RiAddLine className="h-5 w-5" />
+              <RiFolderAddLine className="h-4.5 w-4.5" />
             </button>
           </div>
         </div>
@@ -1630,88 +1523,36 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                     mobileVariant={mobileVariant}
                     onToggle={() => toggleProject(projectKey)}
                     onHoverChange={(hovered) => setHoveredProjectId(hovered ? projectKey : null)}
-                    onOpenWorktreeManager={() => handleOpenWorktreeManager(projectKey)}
+                    onNewSession={() => {
+                      if (projectKey !== activeProjectId) {
+                        setActiveProject(projectKey);
+                      }
+                      setActiveMainTab('chat');
+                      if (mobileVariant) {
+                        setSessionSwitcherOpen(false);
+                      }
+                      if (settingsAutoCreateWorktree && isRepo) {
+                        createWorktreeSession();
+                      } else {
+                        openNewSessionDraft({ directoryOverride: project.normalizedPath });
+                      }
+                    }}
                     onOpenMultiRunLauncher={() => {
                       if (projectKey !== activeProjectId) {
                         setActiveProject(projectKey);
                       }
                       openMultiRunLauncher();
                     }}
-                    onClose={() => setPendingProjectClose({ id: projectKey, label: projectLabel })}
+                    onClose={() => removeProject(projectKey)}
                     sentinelRef={(el) => { projectHeaderSentinelRefs.current.set(projectKey, el); }}
                   >
                     {!isCollapsed ? (
-                      <div className="space-y-2 pl-1">
-                        {section.groups.map((group) => {
-                          const groupKey = `${projectKey}:${group.id}`;
-                          return (
-                            <div key={groupKey} className="relative">
-                              {isDesktopRuntime && (
-                                <div
-                                  ref={(el) => { headerSentinelRefs.current.set(groupKey, el); }}
-                                  data-group-id={groupKey}
-                                  className="absolute top-0 h-px w-full pointer-events-none"
-                                  aria-hidden="true"
-                                />
-                              )}
-                              <button
-                                type="button"
-                                onClick={() => toggleGroup(groupKey)}
-                                className={cn(
-                                  'sticky top-[38px] z-[9] pt-1.5 pb-1 w-full text-left cursor-pointer group/header border-b',
-                                  !isDesktopRuntime && 'bg-sidebar',
-                                )}
-                                style={{
-                                  backgroundColor: isDesktopRuntime
-                                    ? stuckHeaders.has(groupKey) ? 'var(--sidebar-stuck-bg)' : 'transparent'
-                                    : undefined,
-                                  borderColor: hoveredGroupId === groupKey
-                                    ? 'var(--color-border)'
-                                    : collapsedGroups.has(groupKey)
-                                      ? 'color-mix(in srgb, var(--color-border) 35%, transparent)'
-                                      : 'var(--color-border)'
-                                }}
-                                onMouseEnter={() => setHoveredGroupId(groupKey)}
-                                onMouseLeave={() => setHoveredGroupId(null)}
-                                aria-label={collapsedGroups.has(groupKey) ? 'Expand group' : 'Collapse group'}
-                              >
-                                <div className="flex items-center justify-between gap-2 px-1">
-                                  <span className="typography-micro font-medium text-muted-foreground truncate group-hover/header:text-foreground">
-                                    {group.label}
-                                  </span>
-                                  {!hideDirectoryControls && (
-                                    <span
-                                      role="button"
-                                      tabIndex={0}
-                                      className={cn(
-                                        'inline-flex h-5 w-5 items-center justify-center rounded-md text-muted-foreground/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/50 hover:text-foreground',
-                                      )}
-                                      aria-label="Create session in this group"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleCreateSessionInGroup(group.directory, projectKey);
-                                      }}
-                                      onKeyDown={(e) => {
-                                        if (e.key === 'Enter' || e.key === ' ') {
-                                          e.stopPropagation();
-                                          handleCreateSessionInGroup(group.directory, projectKey);
-                                        }
-                                      }}
-                                    >
-                                      <RiAddLine className="h-4.5 w-4.5" />
-                                    </span>
-                                  )}
-                                </div>
-                              </button>
-
-                              {!collapsedGroups.has(groupKey) ? (
-                                <div className="space-y-[0.6rem] py-1">
-                                  {renderGroupSessions(group, groupKey, projectKey)}
-                                </div>
-                              ) : null}
-                            </div>
-                          );
-                        })}
+                      <div className="space-y-[0.6rem] py-1 pl-1">
+                        {section.groups[0] ? renderGroupSessions(section.groups[0], `${projectKey}:all`, projectKey) : (
+                          <div className="py-1 text-left typography-micro text-muted-foreground">
+                            No sessions yet.
+                          </div>
+                        )}
                       </div>
                     ) : null}
                   </SortableProjectItem>
@@ -1723,7 +1564,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
                 <ProjectDragOverlay
                   projectLabel={activeDragProject.label}
                   isActiveProject={activeDragProject.isActive}
-                  isCollapsed={activeDragProject.isCollapsed}
                 />
               ) : null}
             </DragOverlay>
@@ -1731,36 +1571,6 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         )}
       </ScrollableOverlay>
 
-      <Dialog
-        open={pendingProjectClose !== null}
-        onOpenChange={(open) => {
-          if (!open) {
-            setPendingProjectClose(null);
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Close project?</DialogTitle>
-            <DialogDescription>
-              This removes it from the sidebar. You can add it again later.
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="typography-ui font-medium">
-            {pendingProjectClose?.label}
-          </div>
-
-          <DialogFooter className="gap-2">
-            <Button type="button" variant="secondary" onClick={cancelPendingProjectClose}>
-              Cancel
-            </Button>
-            <Button type="button" variant="destructive" onClick={confirmPendingProjectClose}>
-              Close
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 };

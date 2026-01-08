@@ -130,6 +130,23 @@ const sanitizeProjects = (value: unknown): DesktopSettings['projects'] | undefin
     ) {
       project.lastOpenedAt = candidate.lastOpenedAt;
     }
+    // Preserve worktreeDefaults
+    if (candidate.worktreeDefaults && typeof candidate.worktreeDefaults === 'object') {
+      const wt = candidate.worktreeDefaults as Record<string, unknown>;
+      const defaults: Record<string, unknown> = {};
+      if (typeof wt.branchPrefix === 'string' && wt.branchPrefix.trim()) {
+        defaults.branchPrefix = wt.branchPrefix.trim();
+      }
+      if (typeof wt.baseBranch === 'string' && wt.baseBranch.trim()) {
+        defaults.baseBranch = wt.baseBranch.trim();
+      }
+      if (typeof wt.autoCreateWorktree === 'boolean') {
+        defaults.autoCreateWorktree = wt.autoCreateWorktree;
+      }
+      if (Object.keys(defaults).length > 0) {
+        (project as unknown as Record<string, unknown>).worktreeDefaults = defaults;
+      }
+    }
 
     result.push(project);
   }
@@ -237,6 +254,9 @@ const sanitizeWebSettings = (payload: unknown): DesktopSettings | null => {
   }
   if (typeof candidate.defaultAgent === 'string' && candidate.defaultAgent.length > 0) {
     result.defaultAgent = candidate.defaultAgent;
+  }
+  if (typeof candidate.autoCreateWorktree === 'boolean') {
+    result.autoCreateWorktree = candidate.autoCreateWorktree;
   }
   if (typeof candidate.queueModeEnabled === 'boolean') {
     result.queueModeEnabled = candidate.queueModeEnabled;

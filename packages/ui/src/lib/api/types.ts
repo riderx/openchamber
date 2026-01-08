@@ -281,6 +281,7 @@ export interface GitAPI {
   gitFetch(directory: string, options?: { remote?: string; branch?: string }): Promise<{ success: boolean }>;
   checkoutBranch(directory: string, branch: string): Promise<{ success: boolean; branch: string }>;
   createBranch(directory: string, name: string, startPoint?: string): Promise<{ success: boolean; branch: string }>;
+  renameBranch(directory: string, oldName: string, newName: string): Promise<{ success: boolean; branch: string }>;
   getGitLog(directory: string, options?: GitLogOptions): Promise<GitLogResponse>;
   getCommitFiles(directory: string, hash: string): Promise<GitCommitFilesResponse>;
   getCurrentGitIdentity(directory: string): Promise<GitIdentitySummary | null>;
@@ -316,10 +317,28 @@ export interface FileSearchResult {
   preview?: string[];
 }
 
+export interface CommandExecResult {
+  command: string;
+  success: boolean;
+  exitCode?: number;
+  stdout?: string;
+  stderr?: string;
+  error?: string;
+}
+
 export interface FilesAPI {
   listDirectory(path: string): Promise<DirectoryListResult>;
   search(payload: FileSearchQuery): Promise<FileSearchResult[]>;
   createDirectory(path: string): Promise<{ success: boolean; path: string }>;
+  readFile?(path: string): Promise<{ content: string; path: string }>;
+  writeFile?(path: string, content: string): Promise<{ success: boolean; path: string }>;
+  execCommands?(commands: string[], cwd: string): Promise<{ success: boolean; results: CommandExecResult[] }>;
+}
+
+export interface WorktreeDefaults {
+  branchPrefix?: string;        // e.g. "feature", "bugfix" (no trailing slash)
+  baseBranch?: string;          // e.g. "main", "develop", or "HEAD"
+  autoCreateWorktree?: boolean; // future: skip dialog, create worktree automatically
 }
 
 export interface ProjectEntry {
@@ -328,6 +347,7 @@ export interface ProjectEntry {
   label?: string;
   addedAt?: number;
   lastOpenedAt?: number;
+  worktreeDefaults?: WorktreeDefaults;
 }
 
 export interface SettingsPayload {

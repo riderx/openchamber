@@ -5,6 +5,8 @@ import { useThemeSystem } from '@/contexts/useThemeSystem';
 import { useAssistantStatus } from '@/hooks/useAssistantStatus';
 import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
 import { hasModifier } from '@/lib/utils';
+import { createWorktreeSession } from '@/lib/worktreeSessionCreator';
+import { useConfigStore } from '@/stores/useConfigStore';
 
 export const useKeyboardShortcuts = () => {
   const { openNewSessionDraft, abortCurrentOperation, armAbortPrompt, clearAbortPrompt, currentSessionId } = useSessionStore();
@@ -13,7 +15,6 @@ export const useKeyboardShortcuts = () => {
     toggleHelpDialog,
     toggleSidebar,
     setSessionSwitcherOpen,
-    setSessionCreateDialogOpen,
     setActiveMainTab,
     setSettingsDialogOpen,
     setModelSelectorOpen,
@@ -81,11 +82,20 @@ export const useKeyboardShortcuts = () => {
 
       if (hasModifier(e) && e.key.toLowerCase() === 'n') {
         e.preventDefault();
-        if (e.shiftKey) {
-          setSessionCreateDialogOpen(true);
+        
+        const autoWorktree = useConfigStore.getState().settingsAutoCreateWorktree;
+        // If autoWorktree is true: Cmd+N -> Worktree, Cmd+Shift+N -> Standard
+        // If autoWorktree is false: Cmd+N -> Standard, Cmd+Shift+N -> Worktree
+        const shouldCreateWorktree = autoWorktree ? !e.shiftKey : e.shiftKey;
+
+        if (shouldCreateWorktree) {
+          // Create new session with auto-generated worktree
+          setActiveMainTab('chat');
+          setSessionSwitcherOpen(false);
+          createWorktreeSession();
           return;
         }
-
+        // Open a new session without worktree
         setActiveMainTab('chat');
         setSessionSwitcherOpen(false);
         openNewSessionDraft();
@@ -138,7 +148,6 @@ export const useKeyboardShortcuts = () => {
           isCommandPaletteOpen,
           isHelpDialogOpen,
           isSessionSwitcherOpen,
-          isSessionCreateDialogOpen,
           isAboutDialogOpen,
           activeMainTab,
           isModelSelectorOpen,
@@ -150,7 +159,7 @@ export const useKeyboardShortcuts = () => {
         }
 
         // Skip if any overlay open or not on chat tab
-        const hasOverlay = isCommandPaletteOpen || isHelpDialogOpen || isSessionSwitcherOpen || isSessionCreateDialogOpen || isAboutDialogOpen;
+        const hasOverlay = isCommandPaletteOpen || isHelpDialogOpen || isSessionSwitcherOpen || isAboutDialogOpen;
         const isChatActive = activeMainTab === 'chat';
 
         if (hasOverlay || !isChatActive) {
@@ -168,7 +177,6 @@ export const useKeyboardShortcuts = () => {
           isCommandPaletteOpen,
           isHelpDialogOpen,
           isSessionSwitcherOpen,
-          isSessionCreateDialogOpen,
           isAboutDialogOpen,
           activeMainTab,
         } = useUIStore.getState();
@@ -182,7 +190,7 @@ export const useKeyboardShortcuts = () => {
         }
 
         // Check if any overlay is open or not on chat tab - don't process abort
-        const hasOverlay = isCommandPaletteOpen || isHelpDialogOpen || isSessionSwitcherOpen || isSessionCreateDialogOpen || isAboutDialogOpen;
+        const hasOverlay = isCommandPaletteOpen || isHelpDialogOpen || isSessionSwitcherOpen || isAboutDialogOpen;
         const isChatActive = activeMainTab === 'chat';
 
         if (hasOverlay || !isChatActive) {
@@ -238,7 +246,6 @@ export const useKeyboardShortcuts = () => {
     toggleHelpDialog,
     toggleSidebar,
     setSessionSwitcherOpen,
-    setSessionCreateDialogOpen,
     setActiveMainTab,
     setSettingsDialogOpen,
     setModelSelectorOpen,
