@@ -667,9 +667,13 @@ pub async fn read_file(
     }
 
     let (workspace_roots, default_root) = resolve_workspace_roots(state.settings()).await;
-    let resolved_path = resolve_sandboxed_path(Some(trimmed.to_string()), &workspace_roots, default_root.as_ref())
-        .await
-        .map_err(|_| "File not found or access denied".to_string())?;
+    let resolved_path = resolve_sandboxed_path(
+        Some(trimmed.to_string()),
+        &workspace_roots,
+        default_root.as_ref(),
+    )
+    .await
+    .map_err(|_| "File not found or access denied".to_string())?;
 
     let metadata = fs::metadata(&resolved_path)
         .await
@@ -738,9 +742,13 @@ pub async fn exec_commands(
     }
 
     let (workspace_roots, default_root) = resolve_workspace_roots(state.settings()).await;
-    let resolved_cwd = resolve_sandboxed_path(Some(cwd_trimmed.to_string()), &workspace_roots, default_root.as_ref())
-        .await
-        .map_err(|_| "Working directory not found or access denied".to_string())?;
+    let resolved_cwd = resolve_sandboxed_path(
+        Some(cwd_trimmed.to_string()),
+        &workspace_roots,
+        default_root.as_ref(),
+    )
+    .await
+    .map_err(|_| "Working directory not found or access denied".to_string())?;
 
     let metadata = fs::metadata(&resolved_cwd)
         .await

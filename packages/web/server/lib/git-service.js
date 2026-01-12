@@ -117,6 +117,20 @@ export async function getGlobalIdentity() {
   }
 }
 
+export async function hasLocalIdentity(directory) {
+  const git = simpleGit(normalizeDirectoryPath(directory));
+
+  try {
+    const localUserName = await git.getConfig('user.name', 'local').catch(() => null);
+    const localUserEmail = await git.getConfig('user.email', 'local').catch(() => null);
+
+    // If either user.name or user.email is set in local config, the repo has a local identity
+    return !!(localUserName?.value || localUserEmail?.value);
+  } catch {
+    return false;
+  }
+}
+
 export async function getCurrentIdentity(directory) {
   const git = simpleGit(normalizeDirectoryPath(directory));
 

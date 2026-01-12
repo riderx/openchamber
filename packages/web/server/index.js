@@ -3461,6 +3461,22 @@ async function main(options = {}) {
     }
   });
 
+  app.get('/api/git/has-local-identity', async (req, res) => {
+    const { hasLocalIdentity } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+
+      const hasLocal = await hasLocalIdentity(directory);
+      res.json({ hasLocalIdentity: hasLocal });
+    } catch (error) {
+      console.error('Failed to check local git identity:', error);
+      res.status(500).json({ error: 'Failed to check local git identity' });
+    }
+  });
+
   app.post('/api/git/set-identity', async (req, res) => {
     const { getProfile, setLocalIdentity, getGlobalIdentity } = await getGitLibraries();
     try {

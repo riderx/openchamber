@@ -530,3 +530,15 @@ export async function setGitIdentity(
   }
   return response.json();
 }
+
+export async function hasLocalIdentity(directory: string): Promise<boolean> {
+  if (!directory) {
+    return false;
+  }
+  const response = await fetch(buildUrl(`${API_BASE}/has-local-identity`, directory));
+  if (!response.ok) {
+    throw new Error(`Failed to check local identity: ${response.statusText}`);
+  }
+  const data = await response.json();
+  return data.hasLocalIdentity === true;
+}

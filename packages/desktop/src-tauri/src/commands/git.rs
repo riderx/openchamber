@@ -190,6 +190,8 @@ pub struct GitIdentityProfile {
     pub ssh_key: Option<String>,
     pub color: Option<String>,
     pub icon: Option<String>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]

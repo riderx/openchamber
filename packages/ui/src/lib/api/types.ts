@@ -291,6 +291,7 @@ export interface GitAPI {
   createGitIdentity(profile: GitIdentityProfile): Promise<GitIdentityProfile>;
   updateGitIdentity(id: string, updates: GitIdentityProfile): Promise<GitIdentityProfile>;
   deleteGitIdentity(id: string): Promise<void>;
+  hasLocalIdentity?(directory: string): Promise<boolean>;
 }
 
 export interface FileListEntry {

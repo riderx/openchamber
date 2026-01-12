@@ -169,6 +169,12 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
             await createGitIdentity(profile);
 
             await get().loadProfiles();
+
+            // If this profile is marked as default, update the default setting
+            if (profile.isDefault) {
+              await get().setDefaultProfile(profile.id);
+            }
+
             return true;
           } catch (error) {
             console.error("Failed to create git identity profile:", error);
@@ -188,6 +194,16 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
             await updateGitIdentity(id, updated);
 
             await get().loadProfiles();
+
+            // Handle default setting changes
+            if (updates.isDefault === true) {
+              // This profile is now set as default
+              await get().setDefaultProfile(id);
+            } else if (updates.isDefault === false && get().defaultProfileId === id) {
+              // This profile was default but is no longer - revert to global
+              await get().setDefaultProfile('global');
+            }
+
             return true;
           } catch (error) {
             console.error("Failed to update git identity profile:", error);

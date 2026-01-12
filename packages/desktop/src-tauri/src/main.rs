@@ -28,15 +28,17 @@ use axum::{
     routing::{any, get, post},
     Json, Router,
 };
-use commands::files::{create_directory, exec_commands, list_directory, read_file, search_files, write_file};
+use commands::files::{
+    create_directory, exec_commands, list_directory, read_file, search_files, write_file,
+};
 use commands::git::{
-    add_git_worktree, check_is_git_repository, checkout_branch, create_branch, create_git_commit, rename_branch,
+    add_git_worktree, check_is_git_repository, checkout_branch, create_branch, create_git_commit,
     create_git_identity, delete_git_branch, delete_git_identity, delete_remote_branch,
     ensure_openchamber_ignored, generate_commit_message, get_commit_files,
     get_current_git_identity, get_git_branches, get_git_diff, get_git_file_diff,
     get_git_identities, get_git_log, get_git_status, git_fetch, git_pull, git_push,
-    is_linked_worktree, list_git_worktrees, remove_git_worktree, revert_git_file, set_git_identity,
-    update_git_identity,
+    is_linked_worktree, list_git_worktrees, remove_git_worktree, rename_branch, revert_git_file,
+    set_git_identity, update_git_identity,
 };
 use commands::logs::fetch_desktop_logs;
 
@@ -2372,7 +2374,10 @@ async fn change_directory_handler(
                 "activeProjectId".to_string(),
                 Value::String(active_project_id.clone()),
             );
-            map.insert("lastDirectory".to_string(), Value::String(path_value.clone()));
+            map.insert(
+                "lastDirectory".to_string(),
+                Value::String(path_value.clone()),
+            );
 
             settings
         })
@@ -2512,7 +2517,6 @@ impl SettingsStore {
         }
     }
 
-
     pub(crate) async fn update_with<R, F>(&self, f: F) -> Result<(Value, R)>
     where
         F: FnOnce(Value) -> (Value, R),
@@ -2520,7 +2524,9 @@ impl SettingsStore {
         let _lock = self.guard.lock().await;
 
         let current = match fs::read(&self.path).await {
-            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or(Value::Object(Default::default())),
+            Ok(bytes) => {
+                serde_json::from_slice(&bytes).unwrap_or(Value::Object(Default::default()))
+            }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 Value::Object(Default::default())
             }

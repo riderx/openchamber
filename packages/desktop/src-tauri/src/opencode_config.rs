@@ -128,7 +128,10 @@ fn get_project_config_file(working_directory: &Path) -> PathBuf {
     }
 
     // Default to root opencode.json for new configs
-    candidates.into_iter().next().unwrap_or_else(|| working_directory.join("opencode.json"))
+    candidates
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| working_directory.join("opencode.json"))
 }
 
 /// Get custom config file path from OPENCODE_CONFIG env var
