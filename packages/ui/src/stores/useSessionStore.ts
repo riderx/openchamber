@@ -3,6 +3,7 @@ import type { StoreApi, UseBoundStore } from "zustand";
 import { devtools } from "zustand/middleware";
 import type { Session, Message, Part } from "@opencode-ai/sdk/v2";
 import type { PermissionRequest, PermissionResponse } from "@/types/permission";
+import type { QuestionRequest } from "@/types/question";
 import type { SessionStore, AttachedFile, EditPermissionMode } from "./types/sessionTypes";
 import { ACTIVE_SESSION_WINDOW, MEMORY_LIMITS } from "./types/sessionTypes";
 
@@ -11,6 +12,7 @@ import { useMessageStore } from "./messageStore";
 import { useFileStore } from "./fileStore";
 import { useContextStore } from "./contextStore";
 import { usePermissionStore } from "./permissionStore";
+import { useQuestionStore } from "./questionStore";
 import { opencodeClient } from "@/lib/opencode/client";
 import { useDirectoryStore } from "./useDirectoryStore";
 import { useConfigStore } from "./useConfigStore";
@@ -76,6 +78,7 @@ export const useSessionStore = create<SessionStore>()(
             sessionCompactionUntil: new Map(),
             sessionAbortFlags: new Map(),
             permissions: new Map(),
+            questions: new Map(),
             attachedFiles: [],
             isLoading: false,
             error: null,
@@ -290,7 +293,7 @@ export const useSessionStore = create<SessionStore>()(
                     get().evictLeastRecentlyUsed();
                 },
                 loadMessages: (sessionId: string) => useMessageStore.getState().loadMessages(sessionId),
-                sendMessage: async (content: string, providerID: string, modelID: string, agent?: string, attachments?: AttachedFile[], agentMentionName?: string, additionalParts?: Array<{ text: string; attachments?: AttachedFile[] }>) => {
+                sendMessage: async (content: string, providerID: string, modelID: string, agent?: string, attachments?: AttachedFile[], agentMentionName?: string, additionalParts?: Array<{ text: string; attachments?: AttachedFile[] }>, variant?: string) => {
                     const draft = get().newSessionDraft;
                     const trimmedAgent = typeof agent === 'string' && agent.trim().length > 0 ? agent.trim() : undefined;
 
@@ -340,15 +343,25 @@ export const useSessionStore = create<SessionStore>()(
                                 // ignored
                             }
 
-                            if (draftProviderId && draftModelId) {
-                                try {
-                                    useContextStore
-                                        .getState()
-                                        .saveAgentModelForSession(created.id, effectiveDraftAgent, draftProviderId, draftModelId);
-                                } catch {
-                                    // ignored
+                                if (draftProviderId && draftModelId) {
+                                    try {
+                                        useContextStore
+                                            .getState()
+                                            .saveAgentModelForSession(created.id, effectiveDraftAgent, draftProviderId, draftModelId);
+                                    } catch {
+                                        // ignored
+                                    }
+
+                                    if (variant !== undefined) {
+                                        try {
+                                            useContextStore
+                                                .getState()
+                                                .saveAgentModelVariantForSession(created.id, effectiveDraftAgent, draftProviderId, draftModelId, variant);
+                                        } catch {
+                                            // ignored
+                                        }
+                                    }
                                 }
-                            }
                         }
 
                         try {
@@ -365,7 +378,7 @@ export const useSessionStore = create<SessionStore>()(
                         try {
                             return await useMessageStore
                                 .getState()
-                                .sendMessage(content, providerID, modelID, effectiveDraftAgent, created.id, attachments, agentMentionName, additionalParts);
+                                .sendMessage(content, providerID, modelID, effectiveDraftAgent, created.id, attachments, agentMentionName, additionalParts, variant);
                         } catch (error) {
                             setIdlePhase(created.id);
                             throw error;
@@ -385,14 +398,24 @@ export const useSessionStore = create<SessionStore>()(
                         } catch {
                             // ignored
                         }
-                    }
 
+                        if (variant !== undefined) {
+                            try {
+                                useContextStore
+                                    .getState()
+                                    .saveAgentModelVariantForSession(currentSessionId, effectiveAgent, providerID, modelID, variant);
+                            } catch {
+                                // ignored
+                            }
+                        }
+                    }
+ 
                     if (currentSessionId) {
                         setBusyPhase(currentSessionId);
                     }
 
                     try {
-                        return await useMessageStore.getState().sendMessage(content, providerID, modelID, effectiveAgent, currentSessionId || undefined, attachments, agentMentionName, additionalParts);
+                        return await useMessageStore.getState().sendMessage(content, providerID, modelID, effectiveAgent, currentSessionId || undefined, attachments, agentMentionName, additionalParts, variant);
                     } catch (error) {
                         if (currentSessionId) {
                             setIdlePhase(currentSessionId);
@@ -441,6 +464,12 @@ export const useSessionStore = create<SessionStore>()(
                     return usePermissionStore.getState().addPermission(permission, contextData);
                 },
                 respondToPermission: (sessionId: string, requestId: string, response: PermissionResponse) => usePermissionStore.getState().respondToPermission(sessionId, requestId, response),
+
+                addQuestion: (question: QuestionRequest) => useQuestionStore.getState().addQuestion(question),
+                dismissQuestion: (sessionId: string, requestId: string) => useQuestionStore.getState().dismissQuestion(sessionId, requestId),
+                respondToQuestion: (sessionId: string, requestId: string, answers: string[] | string[][]) => useQuestionStore.getState().respondToQuestion(sessionId, requestId, answers),
+                rejectQuestion: (sessionId: string, requestId: string) => useQuestionStore.getState().rejectQuestion(sessionId, requestId),
+
                 clearError: () => useSessionManagementStore.getState().clearError(),
                 getSessionsByDirectory: (directory: string) => useSessionManagementStore.getState().getSessionsByDirectory(directory),
                 getDirectoryForSession: (sessionId: string) => useSessionManagementStore.getState().getDirectoryForSession(sessionId),
@@ -473,7 +502,9 @@ export const useSessionStore = create<SessionStore>()(
                 getSessionAgentSelection: (sessionId: string) => useContextStore.getState().getSessionAgentSelection(sessionId),
                 saveAgentModelForSession: (sessionId: string, agentName: string, providerId: string, modelId: string) => useContextStore.getState().saveAgentModelForSession(sessionId, agentName, providerId, modelId),
                 getAgentModelForSession: (sessionId: string, agentName: string) => useContextStore.getState().getAgentModelForSession(sessionId, agentName),
-                analyzeAndSaveExternalSessionChoices: (sessionId: string, agents: Record<string, unknown>[]) => {
+                saveAgentModelVariantForSession: (sessionId: string, agentName: string, providerId: string, modelId: string, variant: string | undefined) => useContextStore.getState().saveAgentModelVariantForSession(sessionId, agentName, providerId, modelId, variant),
+                getAgentModelVariantForSession: (sessionId: string, agentName: string, providerId: string, modelId: string) => useContextStore.getState().getAgentModelVariantForSession(sessionId, agentName, providerId, modelId),
+                analyzeAndSaveExternalSessionChoices: (sessionId: string, agents: Record<string, unknown>[]) => { 
                     const messages = useMessageStore.getState().messages;
                     return useContextStore.getState().analyzeAndSaveExternalSessionChoices(sessionId, agents, messages);
                 },
@@ -854,6 +885,16 @@ usePermissionStore.subscribe((state, prevState) => {
     });
 });
 
+useQuestionStore.subscribe((state, prevState) => {
+    if (state.questions === prevState.questions) {
+        return;
+    }
+
+    useSessionStore.setState({
+        questions: state.questions,
+    });
+});
+
 useDirectoryStore.subscribe((state, prevState) => {
     const nextDirectory = normalizePath(state.currentDirectory ?? null);
     const prevDirectory = normalizePath(prevState.currentDirectory ?? null);
@@ -902,6 +943,7 @@ useSessionStore.setState({
     lastUsedProvider: useMessageStore.getState().lastUsedProvider,
     isSyncing: useMessageStore.getState().isSyncing,
     permissions: usePermissionStore.getState().permissions,
+    questions: useQuestionStore.getState().questions,
     attachedFiles: useFileStore.getState().attachedFiles,
     sessionModelSelections: useContextStore.getState().sessionModelSelections,
     sessionAgentSelections: useContextStore.getState().sessionAgentSelections,

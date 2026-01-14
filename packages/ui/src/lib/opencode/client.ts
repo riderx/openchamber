@@ -14,6 +14,7 @@ import type {
   Event,
 } from "@opencode-ai/sdk/v2";
 import type { PermissionRequest } from "@/types/permission";
+import type { QuestionRequest } from "@/types/question";
 type StreamEvent<TData> = {
   data: TData;
   event?: string;
@@ -432,6 +433,56 @@ class OpencodeService {
   }
 
   /**
+   * Compress and resize image using Canvas.
+   */
+  private async compressImage(dataUrl: string, mimeType: string, quality = 0.8, maxWidth = 2048): Promise<string> {
+    if (typeof document === 'undefined') return dataUrl;
+
+    return new Promise((resolve) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+
+        if (width > maxWidth || height > maxWidth) {
+          if (width > height) {
+            height = Math.round(height * (maxWidth / width));
+            width = maxWidth;
+          } else {
+            width = Math.round(width * (maxWidth / height));
+            height = maxWidth;
+          }
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) {
+          resolve(dataUrl);
+          return;
+        }
+
+        ctx.drawImage(img, 0, 0, width, height);
+
+        let targetMime = mimeType;
+        // Convert large PNGs to JPEG to save space
+        if (mimeType === 'image/png' && dataUrl.length > 2.5 * 1024 * 1024) {
+          targetMime = 'image/jpeg';
+        }
+
+        try {
+            resolve(canvas.toDataURL(targetMime, quality));
+        } catch {
+            resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    });
+  }
+
+  /**
    * Convert HEIC image to JPEG.
    * Returns the original file if conversion fails.
    */
@@ -495,6 +546,23 @@ class OpencodeService {
       return this.convertHeicToJpeg(file);
     }
 
+    // Handle large image compression (Resize > 2048px or > 1MB)
+    if (file.mime.startsWith('image/') && (file.mime === 'image/jpeg' || file.mime === 'image/png' || file.mime === 'image/webp')) {
+         // > ~1MB base64
+         if (file.url.length > 1.33 * 1024 * 1024) {
+             const compressedUrl = await this.compressImage(file.url, file.mime);
+             const newMime = compressedUrl.startsWith('data:image/jpeg') ? 'image/jpeg' : file.mime;
+             // Update the file object with compressed data
+             // We return a new object to avoid mutating the original file ref if used elsewhere, 
+             // but here we just return the part.
+             return {
+                 ...file,
+                 mime: newMime,
+                 url: compressedUrl
+             };
+         }
+    }
+
     // Handle text MIME normalization
     if (!this.shouldNormalizeToTextPlain(file.mime)) {
       return file;
@@ -530,6 +598,7 @@ class OpencodeService {
     text: string;
     prefaceText?: string;
     agent?: string;
+    variant?: string;
     files?: Array<{
       type: 'file';
       mime: string;
@@ -638,6 +707,7 @@ class OpencodeService {
         modelID: params.modelID
       },
       agent: params.agent,
+      variant: params.variant,
       parts
     });
 
@@ -778,6 +848,80 @@ class OpencodeService {
     } catch {
       return [];
     }
+  }
+
+  // Questions ("ask" tool)
+  async replyToQuestion(requestId: string, answers: string[] | string[][]): Promise<boolean> {
+    const normalizedAnswers: string[][] = (() => {
+      if (!Array.isArray(answers) || answers.length === 0) {
+        return [];
+      }
+      if (Array.isArray(answers[0])) {
+        return answers as string[][];
+      }
+      return [answers as string[]];
+    })();
+
+    const result = await this.client.question.reply({
+      requestID: requestId,
+      ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
+      answers: normalizedAnswers,
+    });
+    return result.data || false;
+  }
+
+  async rejectQuestion(requestId: string): Promise<boolean> {
+    const result = await this.client.question.reject({
+      requestID: requestId,
+      ...(this.currentDirectory ? { directory: this.currentDirectory } : {}),
+    });
+    return result.data || false;
+  }
+
+  async listPendingQuestions(options?: { directories?: Array<string | null | undefined> }): Promise<QuestionRequest[]> {
+    const fetches: Array<Promise<QuestionRequest[]>> = [];
+
+    const fetchForDirectory = async (directory?: string | null): Promise<QuestionRequest[]> => {
+      try {
+        const trimmed = typeof directory === 'string' ? directory.trim() : '';
+        const result = await this.client.question.list(trimmed ? { directory: trimmed } : undefined);
+        return (result.data || []) as unknown as QuestionRequest[];
+      } catch {
+        return [];
+      }
+    };
+
+    // Try unscoped first (server may return global pending items).
+    fetches.push(fetchForDirectory(null));
+
+    const uniqueDirectories = new Set<string>();
+    for (const entry of options?.directories ?? []) {
+      const normalized = this.normalizeCandidatePath(entry ?? null);
+      if (normalized) {
+        uniqueDirectories.add(normalized);
+      }
+    }
+
+    for (const directory of uniqueDirectories) {
+      fetches.push(fetchForDirectory(directory));
+    }
+
+    const results = await Promise.all(fetches);
+    const merged: QuestionRequest[] = [];
+    const seenIds = new Set<string>();
+
+    for (const list of results) {
+      for (const item of list) {
+        if (!item || typeof item !== 'object') continue;
+        const id = (item as { id?: unknown }).id;
+        if (typeof id !== 'string' || id.length === 0) continue;
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        merged.push(item);
+      }
+    }
+
+    return merged;
   }
 
   // Configuration

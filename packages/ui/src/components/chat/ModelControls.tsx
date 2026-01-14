@@ -41,7 +41,7 @@ import { getAgentColor } from '@/lib/agentColors';
 import { useDeviceInfo } from '@/lib/device';
 import { calculateEditPermissionUIState, type BashPermissionSetting } from '@/lib/permissions/editPermissionDefaults';
 import { getEditModeColors } from '@/lib/permissions/editModeColors';
-import { cn } from '@/lib/utils';
+import { cn, fuzzyMatch } from '@/lib/utils';
 import { useContextStore } from '@/stores/contextStore';
 import { useConfigStore } from '@/stores/useConfigStore';
 import { useSessionStore } from '@/stores/useSessionStore';
@@ -274,9 +274,13 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         providers,
         currentProviderId,
         currentModelId,
+        currentVariant,
         currentAgentName,
+        settingsDefaultVariant,
         setProvider,
         setModel,
+        setCurrentVariant,
+        getCurrentModelVariants,
         setAgent,
         getCurrentProvider,
         getModelMetadata,
@@ -294,6 +298,8 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         getSessionAgentSelection,
         saveAgentModelForSession,
         getAgentModelForSession,
+        saveAgentModelVariantForSession,
+        getAgentModelVariantForSession,
         analyzeAndSaveExternalSessionChoices,
         getSessionAgentEditMode,
         setSessionAgentEditMode,
@@ -308,7 +314,7 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
     const isVSCodeRuntime = useIsVSCodeRuntime();
     // Only use mobile panels on actual mobile devices, VSCode uses desktop dropdowns
     const isCompact = isMobile;
-    const [activeMobilePanel, setActiveMobilePanel] = React.useState<'model' | 'agent' | null>(null);
+    const [activeMobilePanel, setActiveMobilePanel] = React.useState<'model' | 'agent' | 'variant' | null>(null);
     const [mobileTooltipOpen, setMobileTooltipOpen] = React.useState<'model' | 'agent' | null>(null);
     const [mobileModelQuery, setMobileModelQuery] = React.useState('');
     const closeMobilePanel = React.useCallback(() => setActiveMobilePanel(null), []);
@@ -497,6 +503,15 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
     const currentCapabilityIcons = getCapabilityIcons(currentMetadata);
     const inputModalityIcons = getModalityIcons(currentMetadata, 'input');
     const outputModalityIcons = getModalityIcons(currentMetadata, 'output');
+
+    const availableVariants = React.useMemo(() => {
+        const variantKey = `${currentProviderId}/${currentModelId}`;
+        if (!variantKey) {
+            return [];
+        }
+        return getCurrentModelVariants();
+    }, [getCurrentModelVariants, currentProviderId, currentModelId]);
+    const hasVariants = availableVariants.length > 0;
 
     const costRows = [
         { label: 'Input', value: formatCost(currentMetadata?.cost?.input) },
@@ -850,6 +865,85 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         handleAgentSwitch();
     }, [currentAgentName, currentSessionId, getAgentModelForSession, tryApplyModelSelection, agents, contextHydrated]);
 
+    React.useEffect(() => {
+        if (!contextHydrated || !currentAgentName) {
+            setCurrentVariant(undefined);
+            return;
+        }
+
+        if (!currentProviderId || !currentModelId) {
+            setCurrentVariant(undefined);
+            return;
+        }
+
+        if (availableVariants.length === 0) {
+            setCurrentVariant(undefined);
+            return;
+        }
+
+        if (currentVariant && !availableVariants.includes(currentVariant)) {
+            setCurrentVariant(undefined);
+            return;
+        }
+
+        // Draft state (no session yet): seed from settings default, but don't override
+        // user selection while drafting.
+        if (!currentSessionId) {
+            if (!currentVariant) {
+                const desired = settingsDefaultVariant && availableVariants.includes(settingsDefaultVariant)
+                    ? settingsDefaultVariant
+                    : undefined;
+                setCurrentVariant(desired);
+            }
+            return;
+        }
+
+        const savedVariant = getAgentModelVariantForSession(
+            currentSessionId,
+            currentAgentName,
+            currentProviderId,
+            currentModelId,
+        );
+
+        const resolvedSaved = savedVariant && availableVariants.includes(savedVariant)
+            ? savedVariant
+            : undefined;
+
+        setCurrentVariant(resolvedSaved);
+    }, [
+        availableVariants,
+        contextHydrated,
+        currentSessionId,
+        currentAgentName,
+        currentProviderId,
+        currentModelId,
+        currentVariant,
+        getAgentModelVariantForSession,
+        setCurrentVariant,
+        settingsDefaultVariant,
+    ]);
+
+    const handleVariantSelect = React.useCallback((variant: string | undefined) => {
+        setCurrentVariant(variant);
+
+        if (currentSessionId && currentAgentName && currentProviderId && currentModelId) {
+            saveAgentModelVariantForSession(
+                currentSessionId,
+                currentAgentName,
+                currentProviderId,
+                currentModelId,
+                variant,
+            );
+        }
+    }, [
+        currentAgentName,
+        currentModelId,
+        currentProviderId,
+        currentSessionId,
+        saveAgentModelVariantForSession,
+        setCurrentVariant,
+    ]);
+
     const handleAgentChange = (agentName: string) => {
         try {
             setAgent(agentName);
@@ -1192,19 +1286,19 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
     const renderMobileModelPanel = () => {
         if (!isCompact) return null;
 
-        const normalizedQuery = mobileModelQuery.trim().toLowerCase();
+        const normalizedQuery = mobileModelQuery.trim();
         const filteredProviders = providers
             .map((provider) => {
                 const providerModels = Array.isArray(provider.models) ? provider.models : [];
                 const matchesProvider = normalizedQuery.length === 0
                     ? true
-                    : provider.name.toLowerCase().includes(normalizedQuery) || provider.id.toLowerCase().includes(normalizedQuery);
+                    : fuzzyMatch(provider.name, normalizedQuery) || fuzzyMatch(provider.id, normalizedQuery);
                 const matchingModels = normalizedQuery.length === 0
                     ? providerModels
                     : providerModels.filter((model: ProviderModel) => {
-                        const name = getModelDisplayName(model).toLowerCase();
-                        const id = typeof model.id === 'string' ? model.id.toLowerCase() : '';
-                        return name.includes(normalizedQuery) || id.includes(normalizedQuery);
+                        const name = getModelDisplayName(model);
+                        const id = typeof model.id === 'string' ? model.id : '';
+                        return fuzzyMatch(name, normalizedQuery) || fuzzyMatch(id, normalizedQuery);
                     });
                 return { provider, providerModels: matchingModels, matchesProvider };
             })
@@ -1464,11 +1558,70 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         );
     };
 
+    const renderMobileVariantPanel = () => {
+        if (!isCompact || !hasVariants) return null;
+
+        const isDefault = !currentVariant;
+
+        const handleSelect = (variant: string | undefined) => {
+            handleVariantSelect(variant);
+            closeMobilePanel();
+            requestAnimationFrame(() => {
+                const textarea = document.querySelector<HTMLTextAreaElement>('textarea[data-chat-input="true"]');
+                textarea?.focus();
+            });
+        };
+
+        return (
+            <MobileOverlayPanel
+                open={activeMobilePanel === 'variant'}
+                onClose={closeMobilePanel}
+                title="Thinking"
+            >
+                <div className="flex flex-col gap-1.5">
+                    <button
+                        type="button"
+                        className={cn(
+                            'flex w-full items-center justify-between gap-2 rounded-xl border px-2 py-1.5 text-left',
+                            'focus:outline-none focus-visible:ring-1 focus-visible:ring-primary',
+                            isDefault ? 'border-primary/30 bg-primary/10' : 'border-border/40'
+                        )}
+                        onClick={() => handleSelect(undefined)}
+                    >
+                        <span className="typography-meta font-medium text-foreground">Default</span>
+                        {isDefault && <RiCheckLine className="h-4 w-4 text-primary flex-shrink-0" />}
+                    </button>
+
+                    {availableVariants.map((variant) => {
+                        const selected = currentVariant === variant;
+                        const label = variant.charAt(0).toUpperCase() + variant.slice(1);
+
+                        return (
+                            <button
+                                key={variant}
+                                type="button"
+                                className={cn(
+                                    'flex w-full items-center justify-between gap-2 rounded-xl border px-2 py-1.5 text-left',
+                                    'focus:outline-none focus-visible:ring-1 focus-visible:ring-primary',
+                                    selected ? 'border-primary/30 bg-primary/10' : 'border-border/40'
+                                )}
+                                onClick={() => handleSelect(variant)}
+                            >
+                                <span className="typography-meta font-medium text-foreground">{label}</span>
+                                {selected && <RiCheckLine className="h-4 w-4 text-primary flex-shrink-0" />}
+                            </button>
+                        );
+                    })}
+                </div>
+            </MobileOverlayPanel>
+        );
+    };
+
     const renderMobileAgentPanel = () => {
         if (!isCompact) return null;
-
+ 
         const primaryAgents = agents.filter(agent => isPrimaryMode(agent.mode));
-
+ 
         return (
             <MobileOverlayPanel
                 open={activeMobilePanel === 'agent'}
@@ -1775,13 +1928,12 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         );
     };
 
-    // Filter models based on search query
+    // Filter models based on search query (fuzzy match)
     const filterByQuery = (modelName: string, providerName: string, query: string) => {
         if (!query.trim()) return true;
-        const lowerQuery = query.toLowerCase();
         return (
-            modelName.toLowerCase().includes(lowerQuery) ||
-            providerName.toLowerCase().includes(lowerQuery)
+            fuzzyMatch(modelName, query) ||
+            fuzzyMatch(providerName, query)
         );
     };
 
@@ -2152,6 +2304,94 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
         );
     };
 
+    const renderVariantSelector = () => {
+        if (!hasVariants) {
+            return null;
+        }
+
+        const displayVariant = currentVariant ?? 'Default';
+        const isDefault = !currentVariant;
+        const colorClass = isDefault ? 'text-muted-foreground' : 'text-[color:var(--status-info)]';
+
+        if (isCompact) {
+            return (
+                <button
+                    type="button"
+                    onClick={() => setActiveMobilePanel('variant')}
+                    className={cn(
+                        'model-controls__variant-trigger flex items-center gap-1.5 transition-opacity min-w-0 focus:outline-none',
+                        buttonHeight,
+                        'cursor-pointer hover:opacity-70',
+                    )}
+                >
+                    <RiBrainAi3Line className={cn(controlIconSize, 'flex-shrink-0', colorClass)} />
+                    <span className={cn('model-controls__variant-label', controlTextSize, 'font-medium truncate min-w-0', colorClass)}>
+                        {displayVariant}
+                    </span>
+                </button>
+            );
+        }
+
+        return (
+            <Tooltip delayDuration={800}>
+                <DropdownMenu>
+                    <TooltipTrigger asChild>
+                        <DropdownMenuTrigger asChild>
+                            <div
+                                className={cn(
+                                    'model-controls__variant-trigger flex items-center gap-1.5 transition-opacity cursor-pointer hover:opacity-70 min-w-0',
+                                    buttonHeight,
+                                )}
+                            >
+                                <RiBrainAi3Line className={cn(controlIconSize, 'flex-shrink-0', colorClass)} />
+                                <span
+                                    className={cn(
+                                        'model-controls__variant-label',
+                                        controlTextSize,
+                                        'font-medium min-w-0 truncate',
+                                        isDesktopRuntime ? 'max-w-[180px]' : undefined,
+                                        colorClass,
+                                    )}
+                                >
+                                    {displayVariant}
+                                </span>
+                            </div>
+                        </DropdownMenuTrigger>
+                    </TooltipTrigger>
+                    <DropdownMenuContent align="end" alignOffset={-40} className="w-[min(180px,calc(100vw-2rem))]">
+                        <DropdownMenuLabel className="typography-ui-header font-semibold text-foreground">Thinking</DropdownMenuLabel>
+                        <DropdownMenuItem className="typography-meta" onSelect={() => handleVariantSelect(undefined)}>
+                            <div className="flex items-center justify-between gap-2 w-full min-w-0">
+                                <span className="typography-meta font-medium text-foreground truncate min-w-0">Default</span>
+                                {isDefault && <RiCheckLine className="h-4 w-4 text-primary flex-shrink-0" />}
+                            </div>
+                        </DropdownMenuItem>
+                        {availableVariants.length > 0 && <DropdownMenuSeparator />}
+                        {availableVariants.map((variant) => {
+                            const selected = currentVariant === variant;
+                            const label = variant.charAt(0).toUpperCase() + variant.slice(1);
+                            return (
+                                <DropdownMenuItem
+                                    key={variant}
+                                    className="typography-meta"
+                                    onSelect={() => handleVariantSelect(variant)}
+                                >
+                                    <div className="flex items-center justify-between gap-2 w-full min-w-0">
+                                        <span className="typography-meta font-medium text-foreground truncate min-w-0">{label}</span>
+                                        {selected && <RiCheckLine className="h-4 w-4 text-primary flex-shrink-0" />}
+                                    </div>
+                                </DropdownMenuItem>
+                            );
+                        })}
+                    </DropdownMenuContent>
+                </DropdownMenu>
+                <TooltipContent side="top">
+                    <p className="typography-meta">Thinking: {displayVariant}</p>
+                </TooltipContent>
+            </Tooltip>
+        );
+    };
+
     const renderAgentSelector = () => {
         if (!isCompact) {
             return (
@@ -2344,7 +2584,6 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
 
     const inlineClassName = cn(
         '@container/model-controls flex items-center min-w-0',
-        inlineGapClass,
         // Only force full-width + truncation behaviors on true mobile layouts.
         // VS Code also uses "compact" mode, but should keep its right-aligned inline sizing.
         isMobile && 'w-full',
@@ -2357,17 +2596,18 @@ export const ModelControls: React.FC<ModelControlsProps> = ({ className }) => {
                 <div
                     className={cn(
                         'flex items-center min-w-0 flex-1 justify-end',
+                        inlineGapClass,
                         isMobile && 'overflow-hidden'
                     )}
                 >
+                    {renderVariantSelector()}
                     {renderModelSelector()}
-                </div>
-                <div className={cn('flex items-center min-w-0', inlineGapClass, isMobile && 'flex-shrink-0')}>
                     {renderAgentSelector()}
                 </div>
             </div>
 
             {renderMobileModelPanel()}
+            {renderMobileVariantPanel()}
             {renderMobileAgentPanel()}
             {renderMobileModelTooltip()}
             {renderMobileAgentTooltip()}

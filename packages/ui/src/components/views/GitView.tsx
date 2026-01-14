@@ -108,6 +108,7 @@ export const GitView: React.FC = () => {
   const [expandedCommitHashes, setExpandedCommitHashes] = React.useState<Set<string>>(new Set());
   const [commitFilesMap, setCommitFilesMap] = React.useState<Map<string, CommitFileEntry[]>>(new Map());
   const [loadingCommitHashes, setLoadingCommitHashes] = React.useState<Set<string>>(new Set());
+  const [remoteUrl, setRemoteUrl] = React.useState<string | null>(null);
 
   const handleCopyCommitHash = React.useCallback((hash: string) => {
     navigator.clipboard
@@ -187,6 +188,14 @@ export const GitView: React.FC = () => {
     loadProfiles();
     loadGlobalIdentity();
   }, [loadProfiles, loadGlobalIdentity]);
+
+  React.useEffect(() => {
+    if (!currentDirectory || !git?.getRemoteUrl) {
+      setRemoteUrl(null);
+      return;
+    }
+    git.getRemoteUrl(currentDirectory).then(setRemoteUrl).catch(() => setRemoteUrl(null));
+  }, [currentDirectory, git]);
 
   React.useEffect(() => {
     if (currentDirectory) {
@@ -495,11 +504,45 @@ export const GitView: React.FC = () => {
     if (globalIdentity) {
       unique.set(globalIdentity.id, globalIdentity);
     }
+
+    let repoHostPath: string | null = null;
+    if (remoteUrl) {
+      try {
+        let normalized = remoteUrl.trim();
+        if (normalized.startsWith('git@')) {
+          normalized = 'https://' + normalized.slice(4).replace(':', '/');
+        }
+        if (normalized.endsWith('.git')) {
+          normalized = normalized.slice(0, -4);
+        }
+        const url = new URL(normalized);
+        repoHostPath = url.hostname + url.pathname;
+      } catch { /* ignore */ }
+    }
+
     for (const profile of profiles) {
-      unique.set(profile.id, profile);
+      if (profile.authType !== 'token') {
+        unique.set(profile.id, profile);
+        continue;
+      }
+
+      const profileHost = profile.host;
+      if (!profileHost) {
+        unique.set(profile.id, profile);
+        continue;
+      }
+
+      if (!profileHost.includes('/')) {
+        unique.set(profile.id, profile);
+        continue;
+      }
+
+      if (repoHostPath && repoHostPath === profileHost) {
+        unique.set(profile.id, profile);
+      }
     }
     return Array.from(unique.values());
-  }, [profiles, globalIdentity]);
+  }, [profiles, globalIdentity, remoteUrl]);
 
   const activeIdentityProfile = React.useMemo((): GitIdentityProfile | null => {
     if (currentIdentity?.userName && currentIdentity?.userEmail) {

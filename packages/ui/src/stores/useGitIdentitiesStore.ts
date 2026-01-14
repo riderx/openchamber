@@ -7,20 +7,30 @@ import {
   createGitIdentity,
   updateGitIdentity,
   deleteGitIdentity,
-  getCurrentGitIdentity
+  discoverGitCredentials,
+  getGlobalGitIdentity
 } from "@/lib/gitApi";
 import { getDesktopSettings, updateDesktopSettings, isDesktopRuntime } from "@/lib/desktop";
 import { getRegisteredRuntimeAPIs } from "@/contexts/runtimeAPIRegistry";
+
+export type GitIdentityAuthType = 'ssh' | 'token';
 
 export interface GitIdentityProfile {
   id: string;
   name: string;
   userName: string;
   userEmail: string;
+  authType?: GitIdentityAuthType;
   sshKey?: string | null;
+  host?: string | null;
   color?: string | null;
   icon?: string | null;
   isDefault?: boolean;
+}
+
+export interface DiscoveredGitCredential {
+  host: string;
+  username: string;
 }
 
 interface GitIdentitiesStore {
@@ -29,12 +39,14 @@ interface GitIdentitiesStore {
   defaultProfileId: string | null; // 'global' for system identity, profile id for custom, null for none
   profiles: GitIdentityProfile[];
   globalIdentity: GitIdentityProfile | null;
+  discoveredCredentials: DiscoveredGitCredential[];
   isLoading: boolean;
 
   setSelectedProfile: (id: string | null) => void;
   loadProfiles: () => Promise<boolean>;
   loadGlobalIdentity: () => Promise<boolean>;
   loadDefaultProfileId: () => Promise<boolean>;
+  loadDiscoveredCredentials: () => Promise<boolean>;
   createProfile: (profile: Omit<GitIdentityProfile, 'id'> & { id?: string }) => Promise<boolean>;
   updateProfile: (id: string, updates: Partial<GitIdentityProfile>) => Promise<boolean>;
   deleteProfile: (id: string) => Promise<boolean>;
@@ -42,6 +54,7 @@ interface GitIdentitiesStore {
   getDefaultProfile: () => GitIdentityProfile | undefined;
   setDefaultProfile: (id: string | null) => Promise<boolean>;
   clearDefaultProfile: () => Promise<boolean>;
+  getUnimportedCredentials: () => DiscoveredGitCredential[];
 }
 
 declare global {
@@ -59,6 +72,7 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
         defaultProfileId: 'global', // Default to global identity initially
         profiles: [],
         globalIdentity: null,
+        discoveredCredentials: [],
         isLoading: false,
 
         setSelectedProfile: (id: string | null) => {
@@ -82,7 +96,7 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
 
         loadGlobalIdentity: async () => {
           try {
-            const data = await getCurrentGitIdentity('');
+            const data = await getGlobalGitIdentity();
 
             if (data && data.userName && data.userEmail) {
               const globalProfile: GitIdentityProfile = {
@@ -90,6 +104,7 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
                 name: 'Global Identity',
                 userName: data.userName,
                 userEmail: data.userEmail,
+                authType: data.sshCommand ? 'ssh' : undefined,
                 sshKey: data.sshCommand ? data.sshCommand.replace('ssh -i ', '') : null,
                 color: 'info',
                 icon: 'house'
@@ -152,6 +167,18 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
             return true;
           } catch (error) {
             console.error("Failed to load default git identity id:", error);
+            return false;
+          }
+        },
+
+        loadDiscoveredCredentials: async () => {
+          try {
+            const credentials = await discoverGitCredentials();
+            set({ discoveredCredentials: credentials });
+            return true;
+          } catch (error) {
+            console.error("Failed to discover git credentials:", error);
+            set({ discoveredCredentials: [] });
             return false;
           }
         },
@@ -312,6 +339,16 @@ export const useGitIdentitiesStore = create<GitIdentitiesStore>()(
             console.error("Failed to clear default git identity profile:", error);
             return false;
           }
+        },
+
+        getUnimportedCredentials: () => {
+          const { profiles, discoveredCredentials } = get();
+          // Filter out credentials that have already been imported as token-based profiles
+          return discoveredCredentials.filter(cred => {
+            return !profiles.some(p =>
+              p.authType === 'token' && p.host === cred.host
+            );
+          });
         },
       }),
       {

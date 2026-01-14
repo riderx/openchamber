@@ -57,6 +57,7 @@ import { opencodeClient } from '@/lib/opencode/client';
 import { checkIsGitRepository } from '@/lib/gitApi';
 import { getSafeStorage } from '@/stores/utils/safeStorage';
 import { createWorktreeSession } from '@/lib/worktreeSessionCreator';
+import { isVSCodeRuntime } from '@/lib/desktop';
 
 const PROJECT_COLLAPSE_STORAGE_KEY = 'oc.sessions.projectCollapse';
 const SESSION_EXPANDED_STORAGE_KEY = 'oc.sessions.expandedParents';
@@ -377,6 +378,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
     return typeof window.opencodeDesktop !== 'undefined';
   });
 
+  const isVSCode = React.useMemo(() => isVSCodeRuntime(), []);
+
   React.useEffect(() => {
     try {
       const storedParents = safeStorage.getItem(SESSION_EXPANDED_STORAGE_KEY);
@@ -404,7 +407,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   }, []);
 
   const sortedSessions = React.useMemo(() => {
-    return [...sessions].sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0));
+    return [...sessions].sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0));
   }, [sessions]);
 
   React.useEffect(() => {
@@ -470,7 +473,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
       collection.push(session);
       map.set(parentID, collection);
     });
-    map.forEach((list) => list.sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0)));
+    map.forEach((list) => list.sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0)));
     return map;
   }, [sortedSessions]);
 
@@ -794,7 +797,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
   const buildGroupedSessions = React.useCallback(
     (projectSessions: Session[], projectRoot: string | null, availableWorktrees: WorktreeMetadata[]) => {
       const normalizedProjectRoot = normalizePath(projectRoot ?? null);
-      const sortedProjectSessions = [...projectSessions].sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0));
+      const sortedProjectSessions = [...projectSessions].sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0));
 
       const sessionMap = new Map(sortedProjectSessions.map((session) => [session.id, session]));
       const childrenMap = new Map<string, Session[]>();
@@ -807,7 +810,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
         collection.push(session);
         childrenMap.set(parentID, collection);
       });
-      childrenMap.forEach((list) => list.sort((a, b) => (b.time?.created || 0) - (a.time?.created || 0)));
+      childrenMap.forEach((list) => list.sort((a, b) => (b.time?.updated || 0) - (a.time?.updated || 0)));
 
       // Build worktree lookup map
       const worktreeByPath = new Map<string, WorktreeMetadata>();
@@ -913,7 +916,8 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
   const getSessionsForProject = React.useCallback(
     (project: { normalizedPath: string }) => {
-      const worktreesForProject = availableWorktreesByProject.get(project.normalizedPath) ?? [];
+      // In VS Code, only show sessions from the main project directory (skip worktrees)
+      const worktreesForProject = isVSCode ? [] : (availableWorktreesByProject.get(project.normalizedPath) ?? []);
       const directories = [
         project.normalizedPath,
         ...worktreesForProject
@@ -937,7 +941,7 @@ export const SessionSidebar: React.FC<SessionSidebarProps> = ({
 
       return collected;
     },
-    [availableWorktreesByProject, getSessionsByDirectory, sessionsByDirectory],
+    [availableWorktreesByProject, getSessionsByDirectory, sessionsByDirectory, isVSCode],
   );
 
   const projectSections = React.useMemo(() => {

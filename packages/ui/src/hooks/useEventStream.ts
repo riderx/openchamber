@@ -7,8 +7,13 @@ import { useUIStore, type EventStreamStatus } from '@/stores/useUIStore';
 import { useDirectoryStore } from '@/stores/useDirectoryStore';
 import type { Part, Session, Message } from '@opencode-ai/sdk/v2';
 import type { PermissionRequest } from '@/types/permission';
+import type { QuestionRequest } from '@/types/question';
+import { useProjectsStore } from '@/stores/useProjectsStore';
 import { streamDebugEnabled } from '@/stores/utils/streamDebug';
 import { handleTodoUpdatedEvent } from '@/stores/useTodoStore';
+import { useMcpStore } from '@/stores/useMcpStore';
+import { getRegisteredRuntimeAPIs } from '@/contexts/runtimeAPIRegistry';
+import { isWebRuntime } from '@/lib/desktop';
 
 interface EventData {
   type: string;
@@ -77,9 +82,39 @@ const getMessageFromStore = (sessionId: string, messageId: string): { info: Mess
   const storeState = useSessionStore.getState();
   const sessionMessages = storeState.messages.get(sessionId) || [];
   const message = sessionMessages.find(m => m.info.id === messageId) || null;
-
+  
   messageCache.set(cacheKey, { sessionId, message });
   return message;
+};
+
+const formatModelID = (raw: string): string => {
+  if (!raw) {
+    return 'Assistant';
+  }
+
+  const tokens: string[] = raw.split(/[-_]/);
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < tokens.length) {
+    const current = tokens[i];
+
+    if (/^\d+$/.test(current)) {
+      if (i + 1 < tokens.length && /^\d+$/.test(tokens[i + 1])) {
+        const combined = `${current}.${tokens[i + 1]}`;
+        result.push(combined);
+        i += 2;
+        continue;
+      }
+    }
+
+    result.push(current);
+    i += 1;
+  }
+
+  return result
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
 };
 
 export const useEventStream = () => {
@@ -89,6 +124,8 @@ export const useEventStream = () => {
     updateMessageInfo,
     updateSessionCompaction,
     addPermission,
+    addQuestion,
+    dismissQuestion,
     currentSessionId,
     applySessionMetadata,
     sessions,
@@ -100,6 +137,8 @@ export const useEventStream = () => {
   } = useSessionStore();
 
   const { checkConnection } = useConfigStore();
+  const nativeNotificationsEnabled = useUIStore((state) => state.nativeNotificationsEnabled);
+  const notificationMode = useUIStore((state) => state.notificationMode);
   const fallbackDirectory = useDirectoryStore((state) => state.currentDirectory);
 
   const activeSessionDirectory = React.useMemo(() => {
@@ -148,12 +187,34 @@ export const useEventStream = () => {
       }
     };
 
+    const bootstrapPendingQuestions = async () => {
+      try {
+        const projects = useProjectsStore.getState().projects;
+        const projectDirs = projects.map((project) => project.path);
+        const sessionDirs = sessions.map((session) => (session as { directory?: string | null }).directory);
+
+        const directories = [effectiveDirectory, ...projectDirs, ...sessionDirs];
+
+        const pending = await opencodeClient.listPendingQuestions({ directories });
+        if (cancelled || pending.length === 0) {
+          return;
+        }
+
+        pending.forEach((request) => {
+          addQuestion(request as unknown as QuestionRequest);
+        });
+      } catch {
+        // ignored
+      }
+    };
+
     void bootstrapPendingPermissions();
+    void bootstrapPendingQuestions();
 
     return () => {
       cancelled = true;
     };
-  }, [addPermission]);
+  }, [addPermission, addQuestion, effectiveDirectory, sessions]);
 
   const normalizeDirectory = React.useCallback((value: string | null | undefined): string | null => {
     if (typeof value !== 'string') return null;
@@ -279,6 +340,8 @@ export const useEventStream = () => {
   const resyncInFlightRef = React.useRef<Promise<void> | null>(null);
   const lastResyncAtRef = React.useRef(0);
   const permissionToastShownRef = React.useRef<Set<string>>(new Set());
+  const questionToastShownRef = React.useRef<Set<string>>(new Set());
+  const notifiedMessagesRef = React.useRef<Set<string>>(new Set());
 
   const resolveVisibilityState = React.useCallback((): 'visible' | 'hidden' => {
     if (typeof document === 'undefined') return 'visible';
@@ -590,6 +653,12 @@ export const useEventStream = () => {
           updateSessionActivityPhase(sessionId, phase);
           requestSessionMetadataRefresh(sessionId, typeof props.directory === 'string' ? props.directory : null);
         }
+        break;
+      }
+
+      case 'mcp.tools.changed': {
+        const directory = typeof props.directory === 'string' ? props.directory : effectiveDirectory;
+        void useMcpStore.getState().refresh({ directory: directory ?? null, silent: true });
         break;
       }
 
@@ -980,6 +1049,31 @@ export const useEventStream = () => {
 
 	          completeStreamingMessage(sessionId, messageId);
 
+	          // Only notify when entire message is finished (finish === 'stop')
+	          if (finish === 'stop' && isWebRuntime() && nativeNotificationsEnabled) {
+	            const shouldNotify = notificationMode === 'always' || visibilityStateRef.current === 'hidden';
+
+	            if (shouldNotify) {
+	              const notifiedMessages = notifiedMessagesRef.current;
+
+	              if (!notifiedMessages.has(messageId)) {
+	                notifiedMessages.add(messageId);
+
+	                const runtimeAPIs = getRegisteredRuntimeAPIs();
+
+	                if (runtimeAPIs?.notifications) {
+	                  const rawMode = (messageExt as { mode?: string }).mode || 'agent';
+	                  const rawModel = (messageExt as { modelID?: string }).modelID || 'assistant';
+
+	                  const title = `${rawMode.charAt(0).toUpperCase() + rawMode.slice(1)} agent is ready`;
+	                  const body = `${formatModelID(rawModel)} completed the task`;
+
+	                  void runtimeAPIs.notifications.notifyAgentCompletion({ title, body, tag: messageId });
+	                }
+	              }
+	            }
+	          }
+
 	          // For web/vscode: trigger cooldown only when assistant message has finish === "stop"
 	          // to match desktop backend semantics.
 	          if (!isDesktopRuntimeRef.current) {
@@ -1127,6 +1221,65 @@ export const useEventStream = () => {
       case 'permission.replied':
         break;
 
+      case 'question.asked': {
+        if (!('sessionID' in props) || typeof props.sessionID !== 'string') {
+          break;
+        }
+
+        const request = props as unknown as QuestionRequest;
+        addQuestion(request);
+
+        const toastKey = `${request.sessionID}:${request.id}`;
+        if (!questionToastShownRef.current.has(toastKey)) {
+          setTimeout(() => {
+            const current = currentSessionIdRef.current;
+            if (current === request.sessionID) {
+              return;
+            }
+
+            const pending = useSessionStore
+              .getState()
+              .questions
+              .get(request.sessionID)
+              ?.some((entry) => entry.id === request.id);
+
+            if (!pending) {
+              return;
+            }
+
+            questionToastShownRef.current.add(toastKey);
+
+            const sessionTitle =
+              useSessionStore.getState().sessions.find((s) => s.id === request.sessionID)?.title ||
+              'Session';
+
+            import('sonner').then(({ toast }) => {
+              toast.info('Input needed', {
+                description: sessionTitle,
+                action: {
+                  label: 'Open',
+                  onClick: () => {
+                    useUIStore.getState().setActiveMainTab('chat');
+                    void useSessionStore.getState().setCurrentSession(request.sessionID);
+                  },
+                },
+              });
+            });
+          }, 0);
+        }
+
+        break;
+      }
+
+      case 'question.replied': {
+        const sessionId = typeof props.sessionID === 'string' ? props.sessionID : null;
+        const requestId = typeof props.requestID === 'string' ? props.requestID : null;
+        if (sessionId && requestId) {
+          dismissQuestion(sessionId, requestId);
+        }
+        break;
+      }
+
       case 'todo.updated': {
         const sessionId = typeof props.sessionID === 'string' ? props.sessionID : null;
         const todos = Array.isArray(props.todos) ? props.todos : null;
@@ -1141,10 +1294,14 @@ export const useEventStream = () => {
     }
   }, [
     currentSessionId,
+    nativeNotificationsEnabled,
+    notificationMode,
     addStreamingPart,
     completeStreamingMessage,
     updateMessageInfo,
     addPermission,
+    addQuestion,
+    dismissQuestion,
     checkConnection,
     requestSessionMetadataRefresh,
     updateSessionCompaction,
@@ -1154,7 +1311,8 @@ export const useEventStream = () => {
     updateSessionActivityPhase,
     updateSession,
     removeSessionFromStore,
-    bootstrapState
+    bootstrapState,
+    effectiveDirectory
   ]);
 
   const shouldHoldConnection = React.useCallback(() => {
@@ -1561,6 +1719,8 @@ export const useEventStream = () => {
       cooldownTimers.forEach((timer) => clearTimeout(timer));
       cooldownTimers.clear();
       messageCache.clear();
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- Intentionally accessing current ref value at cleanup time
+      notifiedMessagesRef.current.clear();
 
       pendingResumeRef.current = false;
       visibilityStateRef.current = resolveVisibilityState();

@@ -1,12 +1,17 @@
 import * as vscode from 'vscode';
 import { ChatViewProvider } from './ChatViewProvider';
 import { AgentManagerPanelProvider } from './AgentManagerPanelProvider';
+import { SessionEditorPanelProvider } from './SessionEditorPanelProvider';
 import { createOpenCodeManager, type OpenCodeManager } from './opencode';
 
 let chatViewProvider: ChatViewProvider | undefined;
 let agentManagerProvider: AgentManagerPanelProvider | undefined;
+let sessionEditorProvider: SessionEditorPanelProvider | undefined;
 let openCodeManager: OpenCodeManager | undefined;
 let outputChannel: vscode.OutputChannel | undefined;
+
+let activeSessionId: string | null = null;
+let activeSessionTitle: string | null = null;
 
 const SETTINGS_KEY = 'openchamber.settings';
 
@@ -153,10 +158,43 @@ export async function activate(context: vscode.ExtensionContext) {
 
   // Create Agent Manager panel provider
   agentManagerProvider = new AgentManagerPanelProvider(context, context.extensionUri, openCodeManager);
+  sessionEditorProvider = new SessionEditorPanelProvider(context, context.extensionUri, openCodeManager);
 
   context.subscriptions.push(
     vscode.commands.registerCommand('openchamber.openAgentManager', () => {
       agentManagerProvider?.createOrShow();
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('openchamber.setActiveSession', (sessionId: unknown, title?: unknown) => {
+      if (typeof sessionId === 'string' && sessionId.trim().length > 0) {
+        activeSessionId = sessionId.trim();
+        activeSessionTitle = typeof title === 'string' && title.trim().length > 0 ? title.trim() : null;
+        return;
+      }
+
+      activeSessionId = null;
+      activeSessionTitle = null;
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('openchamber.openActiveSessionInEditor', () => {
+      if (!activeSessionId) {
+        vscode.window.showInformationMessage('OpenChamber: No active session');
+        return;
+      }
+      sessionEditorProvider?.createOrShow(activeSessionId, activeSessionTitle ?? undefined);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand('openchamber.openSessionInEditor', (sessionId: string, title?: string) => {
+      if (typeof sessionId !== 'string' || sessionId.trim().length === 0) {
+        return;
+      }
+      sessionEditorProvider?.createOrShow(sessionId.trim(), title);
     })
   );
 
@@ -385,15 +423,17 @@ export async function activate(context: vscode.ExtensionContext) {
         `Platform: ${process.platform} ${process.arch}`,
         `Workspace folders: ${workspaceFolders.length}${workspaceFolders.length ? ` (${workspaceFolders.join(', ')})` : ''}`,
         `Status: ${openCodeManager?.getStatus() ?? 'unknown'}`,
-        `CLI available: ${openCodeManager?.isCliAvailable() ?? false}`,
         `Working directory: ${openCodeManager?.getWorkingDirectory() ?? ''}`,
         `API URL (configured): ${configuredApiUrl || '(none)'}`,
         `API URL (resolved): ${openCodeManager?.getApiUrl() ?? '(none)'}`,
         debug
+          ? `OpenCode server URL: ${debug.serverUrl ?? '(none)'}`
+          : `OpenCode server URL: (unknown)`,
+        debug
           ? `OpenCode mode: ${debug.mode} (starts=${debug.startCount}, restarts=${debug.restartCount})`
           : `OpenCode mode: (unknown)`,
         debug
-          ? `OpenCode CLI path: ${debug.cliPath || '(not found)'}`
+          ? `OpenCode CLI path: ${debug.cliPath || '(not found - SDK manages process)'}`
           : `OpenCode CLI path: (unknown)`,
         debug
           ? `OpenCode detected port: ${debug.detectedPort ?? '(none)'}`
@@ -435,6 +475,7 @@ export async function activate(context: vscode.ExtensionContext) {
     vscode.window.onDidChangeActiveColorTheme((theme) => {
       chatViewProvider?.updateTheme(theme.kind);
       agentManagerProvider?.updateTheme(theme.kind);
+      sessionEditorProvider?.updateTheme(theme.kind);
     })
   );
 
@@ -450,6 +491,7 @@ export async function activate(context: vscode.ExtensionContext) {
       ) {
         chatViewProvider?.updateTheme(vscode.window.activeColorTheme.kind);
         agentManagerProvider?.updateTheme(vscode.window.activeColorTheme.kind);
+        sessionEditorProvider?.updateTheme(vscode.window.activeColorTheme.kind);
       }
     })
   );
@@ -459,6 +501,7 @@ export async function activate(context: vscode.ExtensionContext) {
     openCodeManager.onStatusChange((status, error) => {
       chatViewProvider?.updateConnectionStatus(status, error);
       agentManagerProvider?.updateConnectionStatus(status, error);
+      sessionEditorProvider?.updateConnectionStatus(status, error);
     })
   );
 
@@ -472,6 +515,7 @@ export async function deactivate() {
   openCodeManager = undefined;
   chatViewProvider = undefined;
   agentManagerProvider = undefined;
+  sessionEditorProvider = undefined;
   outputChannel?.dispose();
   outputChannel = undefined;
 }
