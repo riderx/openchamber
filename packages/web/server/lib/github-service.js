@@ -52,37 +52,38 @@ async function runGhCommand(args, cwd) {
 }
 
 /**
- * Parse the remote URL to get owner/repo
+ * Parse owner/repo from a GitHub PR URL
+ * This is more reliable than parsing from origin remote when working on forks
  */
-async function getRepoInfo(directory) {
+function parseRepoFromPRUrl(prUrl) {
+  if (!prUrl) return null;
+
+  // Match URLs like https://github.com/owner/repo/pull/123
+  const match = prUrl.match(/github\.com\/([^\/]+)\/([^\/]+)\/pull/);
+  if (!match) return null;
+
+  return {
+    owner: match[1],
+    repo: match[2],
+  };
+}
+
+/**
+ * Check if directory is a GitHub repository
+ */
+async function isGitHubRepo(directory) {
   const git = simpleGit(normalizeDirectoryPath(directory));
 
   try {
     const remotes = await git.getRemotes(true);
-    const origin = remotes.find(r => r.name === 'origin');
-
-    if (!origin || !origin.refs.fetch) {
-      return null;
-    }
-
-    const url = origin.refs.fetch;
-
-    // Parse GitHub URL (handles https and ssh formats)
-    const httpsMatch = url.match(/github\.com\/([^\/]+)\/([^\/\.]+)/);
-    const sshMatch = url.match(/git@github\.com:([^\/]+)\/([^\/\.]+)/);
-
-    const match = httpsMatch || sshMatch;
-    if (!match) {
-      return null;
-    }
-
-    return {
-      owner: match[1],
-      repo: match[2].replace(/\.git$/, ''),
-    };
+    const hasGitHubRemote = remotes.some(r => {
+      const url = r.refs?.fetch || '';
+      return url.includes('github.com');
+    });
+    return hasGitHubRemote;
   } catch (error) {
-    console.error('Failed to get repo info:', error);
-    return null;
+    console.error('Failed to check GitHub repo:', error);
+    return false;
   }
 }
 
@@ -100,9 +101,10 @@ async function getCurrentBranch(directory) {
  */
 export async function getPRForBranch(directory) {
   const directoryPath = normalizeDirectoryPath(directory);
-  const repoInfo = await getRepoInfo(directory);
 
-  if (!repoInfo) {
+  // Check if it's a GitHub repository
+  const isGitHub = await isGitHubRepo(directory);
+  if (!isGitHub) {
     return { hasPR: false, error: 'Not a GitHub repository' };
   }
 
@@ -124,6 +126,9 @@ export async function getPRForBranch(directory) {
     }
 
     const prData = JSON.parse(stdout);
+
+    // Extract owner/repo from PR URL (works correctly with forks)
+    const repoInfo = parseRepoFromPRUrl(prData.url);
 
     // Get check runs separately for more detail
     let checks = [];
@@ -159,27 +164,29 @@ export async function getPRForBranch(directory) {
       detailsUrl: check.detailsUrl,
     }));
 
-    // Get review comments
+    // Get review comments (only if we have repo info from PR URL)
     let reviewComments = [];
-    try {
-      const { stdout: reviewsStdout } = await runGhCommand([
-        'api',
-        `repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${prData.number}/comments`,
-        '--jq', '.[] | {id, body, user: {login: .user.login}, createdAt: .created_at, updatedAt: .updated_at, path, line: .line, diffHunk: .diff_hunk}'
-      ], directoryPath);
+    if (repoInfo) {
+      try {
+        const { stdout: reviewsStdout } = await runGhCommand([
+          'api',
+          `repos/${repoInfo.owner}/${repoInfo.repo}/pulls/${prData.number}/comments`,
+          '--jq', '.[] | {id, body, user: {login: .user.login}, createdAt: .created_at, updatedAt: .updated_at, path, line: .line, diffHunk: .diff_hunk}'
+        ], directoryPath);
 
-      if (reviewsStdout) {
-        const lines = reviewsStdout.split('\n').filter(Boolean);
-        reviewComments = lines.map(line => {
-          try {
-            return JSON.parse(line);
-          } catch {
-            return null;
-          }
-        }).filter(Boolean);
+        if (reviewsStdout) {
+          const lines = reviewsStdout.split('\n').filter(Boolean);
+          reviewComments = lines.map(line => {
+            try {
+              return JSON.parse(line);
+            } catch {
+              return null;
+            }
+          }).filter(Boolean);
+        }
+      } catch (e) {
+        console.warn('Could not fetch review comments:', e.message);
       }
-    } catch (e) {
-      console.warn('Could not fetch review comments:', e.message);
     }
 
     // Transform comments
