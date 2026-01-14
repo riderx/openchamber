@@ -44,6 +44,11 @@ export class AgentManagerPanelProvider {
       }
     );
 
+    this._panel.iconPath = {
+      light: vscode.Uri.joinPath(this._extensionUri, 'assets', 'icon.svg'),
+      dark: vscode.Uri.joinPath(this._extensionUri, 'assets', 'icon-titlebar.svg'),
+    };
+
     this._panel.webview.html = this._getHtmlForWebview(this._panel.webview);
     
     // Send theme payload (including optional Shiki theme JSON) after the webview is set up.

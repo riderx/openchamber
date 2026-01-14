@@ -54,9 +54,11 @@ export type DesktopSettings = {
   autoDeleteEnabled?: boolean;
   autoDeleteAfterDays?: number;
   defaultModel?: string; // format: "provider/model"
+  defaultVariant?: string;
   defaultAgent?: string;
   autoCreateWorktree?: boolean;
   queueModeEnabled?: boolean;
+  commitMessageModel?: string; // format: "provider/model"
 
   // User-added skills catalogs (persisted to ~/.config/openchamber/settings.json)
   skillCatalogs?: SkillCatalogConfig[];

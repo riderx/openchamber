@@ -13,6 +13,7 @@
   --oc-visual-viewport-offset-top: 0px;
   --oc-keyboard-inset: 0px;
   --oc-keyboard-avoid-offset: 0px;
+  --oc-keyboard-home-indicator: 0px;
   --ui-regular-font-weight: 400;
   --oc-scrollbar-thumb: oklch(0.32 0.03 50 / 0.4);
   --oc-scrollbar-thumb-hover: oklch(0.32 0.03 50 / 0.6);
@@ -1173,6 +1174,11 @@ html:not(.dark) .chat-scroll {
       padding-bottom: var(--oc-safe-area-bottom-visual) !important;
     }
 
+    /* iOS keyboard home indicator safe area - used when keyboard is open */
+    .ios-keyboard-safe-area {
+      padding-bottom: calc(var(--oc-keyboard-home-indicator, 34px) + var(--oc-safe-area-bottom-visual, 0px)) !important;
+    }
+
     /* Prevent keyboard-induced page scroll on iOS PWA */
     body {
       min-height: 100vh;
@@ -1517,4 +1523,26 @@ html:not(.dark) .chat-scroll {
 .streamdown-content [data-streamdown="code-block"] {
   content-visibility: visible !important;
   contain-intrinsic-size: none !important;
+}
+
+/* Hide system caret in terminal - targets both Ghostty internal input and our custom touch input */
+.terminal-viewport-container textarea {
+  caret-color: transparent !important;
+}
+
+/* Mobile Terminal Optimizations */
+@media (max-width: 1024px) {
+  .terminal-viewport-container {
+    font-variant-ligatures: none;
+    font-feature-settings: "liga" 0, "calt" 0;
+  }
+}
+
+/* Font loading states */
+.fonts-loading .terminal-viewport-container {
+  font-family: monospace;
+}
+
+.fonts-loaded .terminal-viewport-container {
+  font-family: "JetBrainsMono Nerd Font", "FiraCode Nerd Font", "Fira Code", "JetBrains Mono", "SFMono-Regular", Menlo, Consolas, "Liberation Mono", "Courier New", monospace;
 }

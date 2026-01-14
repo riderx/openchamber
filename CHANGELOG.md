@@ -4,6 +4,52 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [1.4.9] - 2026-01-14
+
+- VSCode: added session editor panel to view sessions alongside files.
+- VSCode: improved server connection reliability with multiple URL candidate support.
+- Diff: added stacked/inline diff mode toggle in settings with sidebar file navigation (thanks to @nelsonpires).
+- Mobile: fixed iOS keyboard safe area padding for home indicator bar (thanks to @Jovines).
+- Upload: increased attachment size limit to 50MB with automatic image compression to 2048px for large files.
+
+
+## [1.4.8] - 2026-01-14
+
+- Git Identities: added token-based authentication support with ~/.git-credentials discovery and import.
+- Settings: consolidated Git settings and added opencode zen model selection for commit generation (thanks to @nelsonpires).
+- Web Notifications: added configurable native web notifications for assistant completion (thanks to @vio1ator).
+- Chat: sidebar sessions are now automatically sorted by last updated date (thanks to @vio1ator).
+- Chat: fixed edit tool output and added turn duration.
+- UI: todo lists and status indicators now hide automatically when all tasks are completed (thanks to @vio1ator).
+- Reliability: improved project state preservation on validation failures (thanks to @vio1ator) and refined server health monitoring.
+- Stability: added graceful shutdown handling for the server process (thanks to @vio1ator).
+
+
+## [1.4.7] - 2026-01-10
+
+- Skills: added ClawdHub integration as built-in market for skills.
+- Web: fixed issues in terminal
+
+
+## [1.4.6] - 2026-01-09
+
+- VSCode/Web: switch opencode cli management to SDK.
+- Input: removed auto-complete and auto-correction.
+- Shortcuts: switched agent cycling shortcut from Shift + TAB to TAB again.
+- Chat: added question tool support with a rich UI for interaction.
+
+
+## [1.4.5] - 2026-01-08
+
+- Chat: added support for model variants (thinking effort).
+- Shortcuts: Switched agent cycling shortcut from TAB to Shift + TAB.
+- Skills: added autocomplete for skills on "/" when it is not the first character in input.
+- Autocomplete: added scope badges for commands/agents/skills.
+- Compact: changed /summarize command to be /compact and use sdk for compaction.
+- MCP: added ability to dynamically enabled/disabled configured MCP.
+- Web: refactored project adding UI with autocomplete.
+
+
 ## [1.4.4] - 2026-01-08
 
 - Agent Manager / Multi Run: select agent per worktree session (thanks to @wienans).

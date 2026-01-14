@@ -2,7 +2,7 @@
   "name": "openchamber",
   "displayName": "OpenChamber",
   "description": "AI coding assistant powered by OpenCode",
-  "version": "1.4.4",
+  "version": "1.4.9",
   "publisher": "fedaykindev",
   "private": true,
   "repository": {
@@ -88,6 +88,12 @@
         "icon": "$(circuit-board)"
       },
       {
+        "command": "openchamber.openActiveSessionInEditor",
+        "category": "OpenChamber",
+        "title": "Open Active Session in Editor",
+        "icon": "$(link-external)"
+      },
+      {
         "command": "openchamber.addToContext",
         "category": "OpenChamber",
         "title": "Add to Context"
@@ -141,14 +147,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "openchamber.openAgentManager",
+          "command": "openchamber.openActiveSessionInEditor",
           "when": "view == openchamber.chatView",
           "group": "navigation@2"
         },
         {
-          "command": "openchamber.showSettings",
+          "command": "openchamber.openAgentManager",
           "when": "view == openchamber.chatView",
           "group": "navigation@3"
+        },
+        {
+          "command": "openchamber.showSettings",
+          "when": "view == openchamber.chatView",
+          "group": "navigation@4"
         }
       ],
       "openchamber.submenu": [
@@ -187,17 +198,19 @@
     "package": "vsce package --no-dependencies"
   },
   "devDependencies": {
+    "@types/adm-zip": "^0.5.7",
     "@types/vscode": "^1.85.0",
     "@vitejs/plugin-react": "^5.0.0",
+    "@vscode/vsce": "^3.2.1",
     "concurrently": "^9.2.1",
     "esbuild": "^0.24.2",
     "typescript": "~5.8.3",
-    "vite": "^7.1.2",
-    "@vscode/vsce": "^3.2.1"
+    "vite": "^7.1.2"
   },
   "dependencies": {
     "@openchamber/ui": "workspace:*",
-    "@opencode-ai/sdk": "^1.1.1",
+    "@opencode-ai/sdk": "^1.1.19",
+    "adm-zip": "^0.5.16",
     "jsonc-parser": "^3.3.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",

@@ -1,7 +1,7 @@
 import * as vscode from 'vscode';
 import * as os from 'os';
 import * as path from 'path';
-import type { OpenCodeManager } from './opencode';
+import { type OpenCodeManager } from './opencode';
 import { createAgent, createCommand, deleteAgent, deleteCommand, getAgentSources, getCommandSources, updateAgent, updateCommand, type AgentScope, type CommandScope, AGENT_SCOPE, COMMAND_SCOPE, discoverSkills, getSkillSources, createSkill, updateSkill, deleteSkill, readSkillSupportingFile, writeSkillSupportingFile, deleteSkillSupportingFile, type SkillScope, SKILL_SCOPE } from './opencodeConfig';
 import { removeProviderAuth } from './opencodeAuth';
 import * as gitService from './gitService';
@@ -80,6 +80,15 @@ const persistSettings = async (changes: Record<string, unknown>, ctx?: BridgeCon
   const current = readSettings(ctx);
   const restChanges = { ...(changes || {}) };
   delete restChanges.lastDirectory;
+
+  // Normalize empty-string clears to key removal (match web/desktop behavior)
+  for (const key of ['defaultModel', 'defaultVariant', 'defaultAgent']) {
+    const value = restChanges[key];
+    if (typeof value === 'string' && value.trim().length === 0) {
+      delete restChanges[key];
+    }
+  }
+
   const merged = { ...current, ...restChanges, lastDirectory: current.lastDirectory };
   await ctx?.context?.globalState.update(SETTINGS_KEY, merged);
   return merged;
@@ -593,6 +602,11 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
           const shell = process.env.SHELL || (process.platform === 'win32' ? 'cmd.exe' : '/bin/sh');
           const shellFlag = process.platform === 'win32' ? '/c' : '-c';
 
+          const augmentedEnv = {
+            ...process.env,
+            PATH: process.env.PATH,
+          };
+
           const results: Array<{
             command: string;
             success: boolean;
@@ -611,6 +625,7 @@ export async function handleBridgeMessage(message: BridgeRequest, ctx?: BridgeCo
               // Use async exec to not block the extension host event loop
               const { stdout, stderr } = await execAsync(`${shell} ${shellFlag} "${cmd.replace(/"/g, '\\"')}"`, {
                 cwd: resolvedCwd,
+                env: augmentedEnv,
                 timeout: 300000, // 5 minutes per command
               });
               results.push({

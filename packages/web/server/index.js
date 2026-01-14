@@ -9,12 +9,12 @@ import os from 'os';
 import crypto from 'crypto';
 import { createUiAuth } from './lib/ui-auth.js';
 import { startCloudflareTunnel, printTunnelWarning, checkCloudflaredAvailable } from './lib/cloudflare-tunnel.js';
+import { createOpencodeServer } from '@opencode-ai/sdk/server';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const DEFAULT_PORT = 3000;
-const DEFAULT_OPENCODE_PORT = 0;
 const HEALTH_CHECK_INTERVAL = 30000;
 const SHUTDOWN_TIMEOUT = 10000;
 const MODELS_DEV_API_URL = 'https://models.dev/api.json';
@@ -38,6 +38,9 @@ const FILE_SEARCH_EXCLUDED_DIRS = new Set([
   'tmp',
   'logs'
 ]);
+
+// Lock to prevent race conditions in persistSettings
+let persistSettingsLock = Promise.resolve();
 
 const normalizeDirectoryPath = (value) => {
   if (typeof value !== 'string') {
@@ -590,17 +593,27 @@ const sanitizeSettingsUpdate = (payload) => {
     result.typographySizes = typography;
   }
 
-  if (typeof candidate.defaultModel === 'string' && candidate.defaultModel.length > 0) {
-    result.defaultModel = candidate.defaultModel;
+  if (typeof candidate.defaultModel === 'string') {
+    const trimmed = candidate.defaultModel.trim();
+    result.defaultModel = trimmed.length > 0 ? trimmed : undefined;
   }
-  if (typeof candidate.defaultAgent === 'string' && candidate.defaultAgent.length > 0) {
-    result.defaultAgent = candidate.defaultAgent;
+  if (typeof candidate.defaultVariant === 'string') {
+    const trimmed = candidate.defaultVariant.trim();
+    result.defaultVariant = trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (typeof candidate.defaultAgent === 'string') {
+    const trimmed = candidate.defaultAgent.trim();
+    result.defaultAgent = trimmed.length > 0 ? trimmed : undefined;
   }
   if (typeof candidate.queueModeEnabled === 'boolean') {
     result.queueModeEnabled = candidate.queueModeEnabled;
   }
   if (typeof candidate.autoCreateWorktree === 'boolean') {
     result.autoCreateWorktree = candidate.autoCreateWorktree;
+  }
+  if (typeof candidate.commitMessageModel === 'string') {
+    const trimmed = candidate.commitMessageModel.trim();
+    result.commitMessageModel = trimmed.length > 0 ? trimmed : undefined;
   }
 
   const skillCatalogs = sanitizeSkillCatalogs(candidate.skillCatalogs);
@@ -690,30 +703,39 @@ const formatSettingsResponse = (settings) => {
 };
 
 const validateProjectEntries = async (projects) => {
+  console.log(`[validateProjectEntries] Starting validation for ${projects.length} projects`);
+
   if (!Array.isArray(projects)) {
+    console.warn(`[validateProjectEntries] Input is not an array, returning empty`);
     return [];
   }
 
   const results = [];
   for (const project of projects) {
     if (!project || typeof project.path !== 'string' || project.path.length === 0) {
+      console.error(`[validateProjectEntries] Invalid project entry: missing or empty path`, project);
       continue;
     }
     try {
       const stats = await fsPromises.stat(project.path);
       if (!stats.isDirectory()) {
+        console.error(`[validateProjectEntries] Project path is not a directory: ${project.path}`);
         continue;
       }
       results.push(project);
     } catch (error) {
       const err = error;
+      console.error(`[validateProjectEntries] Failed to validate project "${project.path}": ${err.code || err.message || err}`);
       if (err && typeof err === 'object' && err.code === 'ENOENT') {
+        console.log(`[validateProjectEntries] Removing project with ENOENT: ${project.path}`);
         continue;
       }
-      continue;
+      console.log(`[validateProjectEntries] Keeping project despite non-ENOENT error: ${project.path}`);
+      results.push(project);
     }
   }
 
+  console.log(`[validateProjectEntries] Validation complete: ${results.length}/${projects.length} projects valid`);
   return results;
 };
 
@@ -788,27 +810,39 @@ const readSettingsFromDiskMigrated = async () => {
 };
 
 const persistSettings = async (changes) => {
-  const current = await readSettingsFromDisk();
-  const sanitized = sanitizeSettingsUpdate(changes);
-  let next = mergePersistedSettings(current, sanitized);
+  // Serialize concurrent calls using lock
+  persistSettingsLock = persistSettingsLock.then(async () => {
+    console.log(`[persistSettings] Called with changes:`, JSON.stringify(changes, null, 2));
+    const current = await readSettingsFromDisk();
+    console.log(`[persistSettings] Current projects count:`, Array.isArray(current.projects) ? current.projects.length : 'N/A');
+    const sanitized = sanitizeSettingsUpdate(changes);
+    let next = mergePersistedSettings(current, sanitized);
 
-  if (Array.isArray(next.projects)) {
-    const validated = await validateProjectEntries(next.projects);
-    next = { ...next, projects: validated };
-  }
-
-  if (Array.isArray(next.projects) && next.projects.length > 0) {
-    const activeId = typeof next.activeProjectId === 'string' ? next.activeProjectId : '';
-    const active = next.projects.find((project) => project.id === activeId) || null;
-    if (!active) {
-      next = { ...next, activeProjectId: next.projects[0].id };
+    if (Array.isArray(next.projects)) {
+      console.log(`[persistSettings] Validating ${next.projects.length} projects...`);
+      const validated = await validateProjectEntries(next.projects);
+      console.log(`[persistSettings] After validation: ${validated.length} projects remain`);
+      next = { ...next, projects: validated };
     }
-  } else if (next.activeProjectId) {
-    next = { ...next, activeProjectId: undefined };
-  }
 
-  await writeSettingsToDisk(next);
-  return formatSettingsResponse(next);
+    if (Array.isArray(next.projects) && next.projects.length > 0) {
+      const activeId = typeof next.activeProjectId === 'string' ? next.activeProjectId : '';
+      const active = next.projects.find((project) => project.id === activeId) || null;
+      if (!active) {
+        console.log(`[persistSettings] Active project ID ${activeId} not found, switching to ${next.projects[0].id}`);
+        next = { ...next, activeProjectId: next.projects[0].id };
+      }
+    } else if (next.activeProjectId) {
+      console.log(`[persistSettings] No projects found, clearing activeProjectId ${next.activeProjectId}`);
+      next = { ...next, activeProjectId: undefined };
+    }
+
+    await writeSettingsToDisk(next);
+    console.log(`[persistSettings] Successfully saved ${next.projects?.length || 0} projects to disk`);
+    return formatSettingsResponse(next);
+  });
+  
+  return persistSettingsLock;
 };
 
 // HMR-persistent state via globalThis
@@ -842,7 +876,6 @@ let openCodeApiDetectionTimer = null;
 let isDetectingApiPrefix = false;
 let openCodeApiDetectionPromise = null;
 let lastOpenCodeError = null;
-let openCodePortWaiters = [];
 let isOpenCodeReady = false;
 let openCodeNotReadySince = 0;
 let exitOnShutdown = true;
@@ -884,12 +917,7 @@ async function isOpenCodeProcessHealthy() {
     return false;
   }
 
-  // Check if process is still running
-  if (openCodeProcess.exitCode !== null || openCodeProcess.signalCode !== null) {
-    return false;
-  }
-
-  // Health check via HTTP
+  // Health check via HTTP since SDK object doesn't expose exitCode
   try {
     const response = await fetch(`http://127.0.0.1:${openCodePort}/session`, {
       method: 'GET',
@@ -899,102 +927,6 @@ async function isOpenCodeProcessHealthy() {
   } catch {
     return false;
   }
-}
-
-const OPENCODE_BINARY_ENV =
-  process.env.OPENCODE_BINARY ||
-  process.env.OPENCHAMBER_BINARY ||
-  process.env.OPENCODE_PATH ||
-  process.env.OPENCHAMBER_OPENCODE_PATH ||
-  null;
-
-function buildAugmentedPath() {
-  const augmented = new Set();
-
-  const loginShellPath = getLoginShellPath();
-  if (loginShellPath) {
-    for (const segment of loginShellPath.split(path.delimiter)) {
-      if (segment) {
-        augmented.add(segment);
-      }
-    }
-  }
-
-  const current = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
-  for (const segment of current) {
-    augmented.add(segment);
-  }
-
-  return Array.from(augmented).join(path.delimiter);
-}
-
-function getLoginShellPath() {
-  if (process.platform === 'win32') {
-    return null;
-  }
-
-  const shell = process.env.SHELL || '/bin/zsh';
-  const shellName = path.basename(shell);
-
-  // Nushell requires different flag syntax and PATH access
-  const isNushell = shellName === 'nu' || shellName === 'nushell';
-  const args = isNushell
-    ? ['-l', '-i', '-c', '$env.PATH | str join (char esep)']
-    : ['-lic', 'echo -n "$PATH"'];
-
-  try {
-    const result = spawnSync(shell, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    if (result.status === 0 && typeof result.stdout === 'string') {
-      const value = result.stdout.trim();
-      if (value) {
-        return value;
-      }
-    } else if (result.stderr) {
-      console.warn(`Failed to read PATH from login shell (${shell}): ${result.stderr}`);
-    }
-  } catch (error) {
-    console.warn(`Error executing login shell (${shell}) for PATH detection: ${error.message}`);
-  }
-  return null;
-}
-
-function resolveBinaryFromPath(binaryName, searchPath) {
-  if (!binaryName) {
-    return null;
-  }
-  if (path.isAbsolute(binaryName)) {
-    return fs.existsSync(binaryName) ? binaryName : null;
-  }
-  const directories = searchPath.split(path.delimiter).filter(Boolean);
-  for (const directory of directories) {
-    try {
-      const candidate = path.join(directory, binaryName);
-      if (fs.existsSync(candidate)) {
-        const stats = fs.statSync(candidate);
-        if (stats.isFile()) {
-          return candidate;
-        }
-      }
-    } catch {
-      // Ignore resolution errors, continue searching
-    }
-  }
-  return null;
-}
-
-function getOpencodeSpawnConfig() {
-  if (OPENCODE_BINARY_ENV) {
-    const explicit = resolveBinaryFromPath(OPENCODE_BINARY_ENV, process.env.PATH);
-    if (explicit) {
-      console.log(`Using OpenCode binary from OPENCODE_BINARY: ${explicit}`);
-      return { command: explicit, env: undefined };
-    }
-    console.warn(
-      `OPENCODE_BINARY path "${OPENCODE_BINARY_ENV}" not found. Falling back to search.`
-    );
-  }
-
-  return { command: 'opencode', env: undefined };
 }
 
 const ENV_CONFIGURED_OPENCODE_PORT = (() => {
@@ -1039,18 +971,6 @@ function setOpenCodePort(port) {
   }
 
   lastOpenCodeError = null;
-
-  if (openCodePortWaiters.length > 0) {
-    const waiters = openCodePortWaiters;
-    openCodePortWaiters = [];
-    for (const notify of waiters) {
-      try {
-        notify(numericPort);
-      } catch (error) {
-        console.warn('Failed to notify OpenCode port waiter:', error);
-      }
-    }
-  }
 }
 
 async function waitForOpenCodePort(timeoutMs = 15000) {
@@ -1058,22 +978,87 @@ async function waitForOpenCodePort(timeoutMs = 15000) {
     return openCodePort;
   }
 
-  return new Promise((resolve, reject) => {
-    const onPortDetected = (port) => {
-      clearTimeout(timeout);
-      resolve(port);
-    };
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    if (openCodePort !== null) {
+      return openCodePort;
+    }
+  }
 
-    const timeout = setTimeout(() => {
-      openCodePortWaiters = openCodePortWaiters.filter((cb) => cb !== onPortDetected);
-      reject(new Error('Timed out waiting for OpenCode port'));
-    }, timeoutMs);
+  throw new Error('Timed out waiting for OpenCode port');
+}
 
-    openCodePortWaiters.push(onPortDetected);
-  });
+function getLoginShellPath() {
+  if (process.platform === 'win32') {
+    return null;
+  }
+
+  const shell = process.env.SHELL || '/bin/zsh';
+  const shellName = path.basename(shell);
+
+  // Nushell requires different flag syntax and PATH access
+  const isNushell = shellName === 'nu' || shellName === 'nushell';
+  const args = isNushell
+    ? ['-l', '-i', '-c', '$env.PATH | str join (char esep)']
+    : ['-lic', 'echo -n "$PATH"'];
+
+  try {
+    const result = spawnSync(shell, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    if (result.status === 0 && typeof result.stdout === 'string') {
+      const value = result.stdout.trim();
+      if (value) {
+        return value;
+      }
+    }
+  } catch (error) {
+    // ignore
+  }
+  return null;
+}
+
+function buildAugmentedPath() {
+  const augmented = new Set();
+
+  const loginShellPath = getLoginShellPath();
+  if (loginShellPath) {
+    for (const segment of loginShellPath.split(path.delimiter)) {
+      if (segment) {
+        augmented.add(segment);
+      }
+    }
+  }
+
+  const current = (process.env.PATH || '').split(path.delimiter).filter(Boolean);
+  for (const segment of current) {
+    augmented.add(segment);
+  }
+
+  return Array.from(augmented).join(path.delimiter);
 }
 
 const API_PREFIX_CANDIDATES = ['', '/api']; // Simplified - only check root and /api
+
+async function waitForReady(url, timeoutMs = 10000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 3000);
+      const res = await fetch(`${url.replace(/\/+$/, '')}/config`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' },
+        signal: controller.signal
+      });
+      clearTimeout(timeout);
+      if (res.ok) return true;
+    } catch {
+      // ignore
+    }
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return false;
+}
 
 function normalizeApiPrefix(prefix) {
   if (!prefix) {
@@ -1107,51 +1092,6 @@ function setDetectedOpenCodeApiPrefix(prefix) {
       openCodeApiDetectionTimer = null;
     }
     console.log(`Detected OpenCode API prefix: ${normalized || '(root)'}`);
-  }
-}
-
-function detectPortFromLogMessage(message) {
-  if (openCodePort && ENV_CONFIGURED_OPENCODE_PORT) {
-    return;
-  }
-
-  const regex = /https?:\/\/[^:\s]+:(\d+)/gi;
-  let match;
-  while ((match = regex.exec(message)) !== null) {
-    const port = parseInt(match[1], 10);
-    if (Number.isFinite(port) && port > 0) {
-      setOpenCodePort(port);
-      return;
-    }
-  }
-
-  const fallbackMatch = /(?:^|\s)(?:127\.0\.0\.1|localhost):(\d+)/i.exec(message);
-  if (fallbackMatch) {
-    const port = parseInt(fallbackMatch[1], 10);
-    if (Number.isFinite(port) && port > 0) {
-      setOpenCodePort(port);
-    }
-  }
-}
-
-function detectPrefixFromLogMessage(message) {
-  if (!openCodePort) {
-    return;
-  }
-
-  const urlRegex = /https?:\/\/[^:\s]+:(\d+)(\/[^\s"']*)?/gi;
-  let match;
-
-  while ((match = urlRegex.exec(message)) !== null) {
-    const portMatch = parseInt(match[1], 10);
-    if (portMatch !== openCodePort) {
-      continue;
-    }
-
-    const path = match[2] || '';
-    const normalized = normalizeApiPrefix(path);
-    setDetectedOpenCodeApiPrefix(normalized);
-    return;
   }
 }
 
@@ -1486,136 +1426,57 @@ function parseArgs(argv = process.argv.slice(2)) {
 }
 
 async function startOpenCode() {
-  const desiredPort = ENV_CONFIGURED_OPENCODE_PORT ?? DEFAULT_OPENCODE_PORT;
+  const desiredPort = ENV_CONFIGURED_OPENCODE_PORT ?? 0;
   console.log(
-    desiredPort
+    desiredPort > 0
       ? `Starting OpenCode on requested port ${desiredPort}...`
       : 'Starting OpenCode with dynamic port assignment...'
   );
-  console.log(`Starting OpenCode in working directory: ${openCodeWorkingDirectory}`);
+  // Note: SDK starts in current process CWD. openCodeWorkingDirectory is tracked but not used for spawn in SDK.
 
-  const { command, env } = getOpencodeSpawnConfig();
-  const args = ['serve', '--port', desiredPort.toString()];
-  console.log(`Launching OpenCode via "${command}" with args ${args.join(' ')}`);
+  try {
+    const serverInstance = await createOpencodeServer({
+      hostname: '127.0.0.1',
+      port: desiredPort,
+      timeout: 30000,
+      env: {
+        ...process.env,
+        // Pass minimal config to avoid pollution, but inherit PATH etc
+      }
+    });
 
-  const child = spawn(command, args, {
-    stdio: 'pipe',
-    env,
-    cwd: openCodeWorkingDirectory
-  });
-  isOpenCodeReady = false;
-  openCodeNotReadySince = Date.now();
-
-  let firstSignalResolver;
-  const firstSignalPromise = new Promise((resolve) => {
-    firstSignalResolver = resolve;
-  });
-  let firstSignalSettled = false;
-  const settleFirstSignal = () => {
-    if (firstSignalSettled) {
-      return;
+    if (!serverInstance || !serverInstance.url) {
+      throw new Error('OpenCode server started but URL is missing');
     }
-    firstSignalSettled = true;
-    clearTimeout(firstSignalTimer);
-    child.stdout.off('data', settleFirstSignal);
-    child.stderr.off('data', settleFirstSignal);
-    child.off('exit', settleFirstSignal);
-    if (firstSignalResolver) {
-      firstSignalResolver();
+
+    const url = new URL(serverInstance.url);
+    const port = parseInt(url.port, 10);
+    const prefix = normalizeApiPrefix(url.pathname);
+
+    if (await waitForReady(serverInstance.url, 10000)) {
+      setOpenCodePort(port);
+      setDetectedOpenCodeApiPrefix(prefix); // SDK URL typically includes the prefix if any
+
+      isOpenCodeReady = true;
+      lastOpenCodeError = null;
+      openCodeNotReadySince = 0;
+
+      return serverInstance;
+    } else {
+      try {
+        serverInstance.close();
+      } catch {
+        // ignore
+      }
+      throw new Error('Server started but health check failed (timeout)');
     }
-  };
-  const firstSignalTimer = setTimeout(settleFirstSignal, 750);
-
-  child.stdout.once('data', settleFirstSignal);
-  child.stderr.once('data', settleFirstSignal);
-  child.once('exit', settleFirstSignal);
-
-  child.stdout.on('data', (data) => {
-    const text = data.toString();
-    console.log(`OpenCode: ${text.trim()}`);
-    detectPortFromLogMessage(text);
-    detectPrefixFromLogMessage(text);
-    settleFirstSignal();
-  });
-
-  child.stderr.on('data', (data) => {
-    const text = data.toString();
-    lastOpenCodeError = text.trim();
-    console.error(`OpenCode Error: ${lastOpenCodeError}`);
-    detectPortFromLogMessage(text);
-    detectPrefixFromLogMessage(text);
-    settleFirstSignal();
-  });
-
-  let startupError = await new Promise((resolve, reject) => {
-    const onSpawn = () => {
-      setOpenCodePort(desiredPort);
-      child.off('error', onError);
-      resolve(null);
-    };
-    const onError = (error) => {
-      child.off('spawn', onSpawn);
-      reject(error);
-    };
-
-    child.once('spawn', onSpawn);
-    child.once('error', onError);
-  }).catch((error) => {
+  } catch (error) {
     lastOpenCodeError = error.message;
     openCodePort = null;
     syncToHmrState();
-    settleFirstSignal();
-    return error;
-  });
-
-  if (startupError) {
-    if (startupError.code === 'ENOENT') {
-      const enhanced = new Error(
-        `Failed to start OpenCode – executable "${command}" not found. ` +
-        'Set OPENCODE_BINARY to the full path of the opencode CLI or ensure it is on PATH.'
-      );
-      enhanced.code = startupError.code;
-      startupError = enhanced;
-    }
-    throw startupError;
+    console.error(`Failed to start OpenCode: ${error.message}`);
+    throw error;
   }
-
-  child.on('exit', (code, signal) => {
-    lastOpenCodeError = `OpenCode exited with code ${code}, signal ${signal ?? 'null'}`;
-    isOpenCodeReady = false;
-    openCodeNotReadySince = Date.now();
-
-    if (!isShuttingDown && !isRestartingOpenCode) {
-      console.log(`OpenCode process exited with code ${code}, signal ${signal}`);
-
-      setTimeout(() => {
-        restartOpenCode().catch((err) => {
-          console.error('Failed to restart OpenCode after exit:', err);
-        });
-      }, 5000);
-    } else if (isRestartingOpenCode) {
-      console.log('OpenCode exit during controlled restart, not triggering auto-restart');
-    }
-  });
-
-  child.on('error', (error) => {
-    lastOpenCodeError = error.message;
-    isOpenCodeReady = false;
-    openCodeNotReadySince = Date.now();
-    console.error(`OpenCode process error: ${error.message}`);
-    if (!isShuttingDown) {
-
-      setTimeout(() => {
-        restartOpenCode().catch((err) => {
-          console.error('Failed to restart OpenCode after error:', err);
-        });
-      }, 5000);
-    }
-  });
-
-  await firstSignalPromise;
-
-  return child;
 }
 
 async function restartOpenCode() {
@@ -1632,60 +1493,16 @@ async function restartOpenCode() {
     console.log('Restarting OpenCode process...');
 
     if (openCodeProcess) {
-      console.log('Waiting for OpenCode process to terminate...');
-      const processToTerminate = openCodeProcess;
-      let forcedTermination = false;
-
-      if (processToTerminate.exitCode === null && processToTerminate.signalCode === null) {
-        processToTerminate.kill('SIGTERM');
-
-        await new Promise((resolve) => {
-          let resolved = false;
-
-          const cleanup = () => {
-            processToTerminate.off('exit', onExit);
-            clearTimeout(forceKillTimer);
-            clearTimeout(hardStopTimer);
-            if (!resolved) {
-              resolved = true;
-              resolve();
-            }
-          };
-
-          const onExit = () => {
-            cleanup();
-          };
-
-          const forceKillTimer = setTimeout(() => {
-            if (resolved) {
-              return;
-            }
-            forcedTermination = true;
-            console.warn('OpenCode process did not exit after SIGTERM, sending SIGKILL');
-            processToTerminate.kill('SIGKILL');
-          }, 3000);
-
-          const hardStopTimer = setTimeout(() => {
-            if (resolved) {
-              return;
-            }
-            console.warn('OpenCode process unresponsive after SIGKILL, continuing restart');
-            cleanup();
-          }, 5000);
-
-          processToTerminate.once('exit', onExit);
-        });
-
-        if (forcedTermination) {
-          console.log('OpenCode process terminated forcefully during restart');
-        }
-      } else {
-        console.log('OpenCode process already stopped before restart command');
+      console.log('Stopping existing OpenCode process...');
+      try {
+        openCodeProcess.close();
+      } catch (error) {
+        console.warn('Error closing OpenCode process:', error);
       }
-
       openCodeProcess = null;
       syncToHmrState();
-
+      
+      // Brief delay to allow port release
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
 
@@ -1696,6 +1513,8 @@ async function restartOpenCode() {
       openCodePort = null;
       syncToHmrState();
     }
+    
+    // Reset detection state
     openCodeApiPrefixDetected = false;
     if (openCodeApiDetectionTimer) {
       clearTimeout(openCodeApiDetectionTimer);
@@ -1707,13 +1526,10 @@ async function restartOpenCode() {
     openCodeProcess = await startOpenCode();
     syncToHmrState();
 
-    if (!ENV_CONFIGURED_OPENCODE_PORT) {
-      await waitForOpenCodePort();
-    }
-
     if (expressApp) {
       setupProxy(expressApp);
-      scheduleOpenCodeApiDetection();
+      // Ensure prefix is set correctly (SDK usually handles this, but just in case)
+      ensureOpenCodeApiPrefix();
     }
   })();
 
@@ -2035,6 +1851,7 @@ function setupProxy(app) {
     },
     onProxyReq: (proxyReq, req, res) => {
       console.log(`Proxying ${req.method} ${req.path} to OpenCode`);
+
       if (req.headers.accept && req.headers.accept.includes('text/event-stream')) {
         console.log(`[SSE] Setting up SSE proxy for ${req.method} ${req.path}`);
         proxyReq.setHeader('Accept', 'text/event-stream');
@@ -2070,11 +1887,11 @@ function startHealthMonitoring() {
   }
 
   healthCheckInterval = setInterval(async () => {
-    if (!openCodeProcess || isShuttingDown) return;
+    if (!openCodeProcess || isShuttingDown || isRestartingOpenCode) return;
 
     try {
-
-      if (openCodeProcess.exitCode !== null) {
+      const healthy = await isOpenCodeProcessHealthy();
+      if (!healthy) {
         console.log('OpenCode process not running, restarting...');
         await restartOpenCode();
       }
@@ -2098,28 +1915,29 @@ async function gracefulShutdown(options = {}) {
 
   if (openCodeProcess) {
     console.log('Stopping OpenCode process...');
-    openCodeProcess.kill('SIGTERM');
-
-    await new Promise((resolve) => {
-      const timeout = setTimeout(() => {
-        openCodeProcess.kill('SIGKILL');
-        resolve();
-      }, SHUTDOWN_TIMEOUT);
-
-      openCodeProcess.on('exit', () => {
-        clearTimeout(timeout);
-        resolve();
-      });
-    });
+    try {
+      openCodeProcess.close();
+    } catch (error) {
+      console.warn('Error closing OpenCode process:', error);
+    }
+    openCodeProcess = null;
   }
 
   if (server) {
-    await new Promise((resolve) => {
-      server.close(() => {
-        console.log('HTTP server closed');
-        resolve();
-      });
-    });
+    await Promise.race([
+      new Promise((resolve) => {
+        server.close(() => {
+          console.log('HTTP server closed');
+          resolve();
+        });
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => {
+          console.warn('Server close timeout reached, forcing shutdown');
+          resolve();
+        }, SHUTDOWN_TIMEOUT);
+      })
+    ]);
   }
 
   if (uiAuthController) {
@@ -2159,7 +1977,7 @@ async function main(options = {}) {
       status: 'ok',
       timestamp: new Date().toISOString(),
       openCodePort: openCodePort,
-      openCodeRunning: Boolean(openCodeProcess && openCodeProcess.exitCode === null),
+      openCodeRunning: Boolean(openCodePort && isOpenCodeReady && !isRestartingOpenCode),
       openCodeApiPrefix,
       openCodeApiPrefixDetected,
       isOpenCodeReady,
@@ -2180,16 +1998,16 @@ async function main(options = {}) {
       req.path.startsWith('/api/opencode')
     ) {
 
-      express.json()(req, res, next);
+      express.json({ limit: '50mb' })(req, res, next);
     } else if (req.path.startsWith('/api')) {
 
       next();
     } else {
 
-      express.json()(req, res, next);
+      express.json({ limit: '50mb' })(req, res, next);
     }
   });
-  app.use(express.urlencoded({ extended: true }));
+  app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
   app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.path}`);
@@ -2613,11 +2431,15 @@ async function main(options = {}) {
   });
 
   app.put('/api/config/settings', async (req, res) => {
+    console.log(`[API:PUT /api/config/settings] Received request`);
+    console.log(`[API:PUT /api/config/settings] Request body:`, JSON.stringify(req.body, null, 2));
     try {
       const updated = await persistSettings(req.body ?? {});
+      console.log(`[API:PUT /api/config/settings] Success, returning ${updated.projects?.length || 0} projects`);
       res.json(updated);
     } catch (error) {
-      console.error('Failed to save settings:', error);
+      console.error(`[API:PUT /api/config/settings] Failed to save settings:`, error);
+      console.error(`[API:PUT /api/config/settings] Error stack:`, error.stack);
       res.status(500).json({ error: error instanceof Error ? error.message : 'Failed to save settings' });
     }
   });
@@ -2919,6 +2741,7 @@ async function main(options = {}) {
   const { parseSkillRepoSource } = await import('./lib/skills-catalog/source.js');
   const { scanSkillsRepository } = await import('./lib/skills-catalog/scan.js');
   const { installSkillsFromRepository } = await import('./lib/skills-catalog/install.js');
+  const { scanClawdHub, installSkillsFromClawdHub, isClawdHubSource } = await import('./lib/skills-catalog/clawdhub/index.js');
   const { getProfiles, getProfile } = await import('./lib/git-identity-storage.js');
 
   const listGitIdentitiesForResponse = () => {
@@ -2975,6 +2798,37 @@ async function main(options = {}) {
       const itemsBySource = {};
 
       for (const src of sources) {
+        // Handle ClawdHub sources separately (API-based, not git-based)
+        if (src.sourceType === 'clawdhub' || isClawdHubSource(src.source)) {
+          const cacheKey = 'clawdhub:registry';
+          let scanResult = !refresh ? getCachedScan(cacheKey) : null;
+
+          if (!scanResult) {
+            const scanned = await scanClawdHub();
+            if (!scanned.ok) {
+              itemsBySource[src.id] = [];
+              continue;
+            }
+            scanResult = scanned;
+            setCachedScan(cacheKey, scanResult);
+          }
+
+          const items = (scanResult.items || []).map((item) => {
+            const installed = installedByName.get(item.skillName);
+            return {
+              ...item,
+              sourceId: src.id,
+              installed: installed
+                ? { isInstalled: true, scope: installed.scope }
+                : { isInstalled: false },
+            };
+          });
+
+          itemsBySource[src.id] = items;
+          continue;
+        }
+
+        // Handle GitHub sources (git clone based)
         const parsed = parseSkillRepoSource(src.source);
         if (!parsed.ok) {
           itemsBySource[src.id] = [];
@@ -3084,6 +2938,29 @@ async function main(options = {}) {
         }
         workingDirectory = resolved.directory;
       }
+
+      // Handle ClawdHub sources (ZIP download based)
+      if (isClawdHubSource(source)) {
+        const result = await installSkillsFromClawdHub({
+          scope,
+          workingDirectory,
+          userSkillDir: SKILL_DIR,
+          selections,
+          conflictPolicy,
+          conflictDecisions,
+        });
+
+        if (!result.ok) {
+          if (result.error?.kind === 'conflicts') {
+            return res.status(409).json({ ok: false, error: result.error });
+          }
+          return res.status(400).json({ ok: false, error: result.error });
+        }
+
+        return res.json({ ok: true, installed: result.installed || [], skipped: result.skipped || [] });
+      }
+
+      // Handle GitHub sources (git clone based)
       const identity = resolveGitIdentity(gitIdentityId);
 
       const result = await installSkillsFromRepository({
@@ -3429,6 +3306,17 @@ async function main(options = {}) {
     }
   });
 
+  app.get('/api/git/discover-credentials', async (req, res) => {
+    try {
+      const { discoverGitCredentials } = await import('./lib/git-credentials.js');
+      const credentials = discoverGitCredentials();
+      res.json(credentials);
+    } catch (error) {
+      console.error('Failed to discover git credentials:', error);
+      res.status(500).json({ error: 'Failed to discover git credentials' });
+    }
+  });
+
   app.get('/api/git/check', async (req, res) => {
     const { isGitRepository } = await getGitLibraries();
     try {
@@ -3442,6 +3330,23 @@ async function main(options = {}) {
     } catch (error) {
       console.error('Failed to check git repository:', error);
       res.status(500).json({ error: 'Failed to check git repository' });
+    }
+  });
+
+  app.get('/api/git/remote-url', async (req, res) => {
+    const { getRemoteUrl } = await getGitLibraries();
+    try {
+      const directory = req.query.directory;
+      if (!directory) {
+        return res.status(400).json({ error: 'directory parameter is required' });
+      }
+      const remote = req.query.remote || 'origin';
+
+      const url = await getRemoteUrl(directory, remote);
+      res.json({ url });
+    } catch (error) {
+      console.error('Failed to get remote url:', error);
+      res.status(500).json({ error: 'Failed to get remote url' });
     }
   });
 
@@ -3629,6 +3534,15 @@ async function main(options = {}) {
         .join('\n\n');
 
       const prompt = `You are drafting git commit notes for this codebase. Respond in JSON of the shape {"subject": string, "highlights": string[]} (ONLY the JSON in response, no markdown wrappers or anything except JSON) with these rules:\n- subject follows our convention: type[optional-scope]: summary (examples: "feat: add diff virtualization", "fix(chat): restore enter key handling")\n- allowed types: feat, fix, chore, style, refactor, perf, docs, test, build, ci (choose the best match or fallback to chore)\n- summary must be imperative, concise, <= 70 characters, no trailing punctuation\n- scope is optional; include only when obvious from filenames/folders; do not invent scopes\n- focus on the most impactful user-facing change; if multiple capabilities ship together, align the subject with the dominant theme and use highlights to cover the other major outcomes\n- highlights array should contain 2-3 plain sentences (<= 90 chars each) that describe distinct features or UI changes users will notice (e.g. "Add per-file revert action in Changes list"). Avoid subjective benefit statements, marketing tone, repeating the subject, or referencing helper function names. Highlight additions such as new controls/buttons, new actions (e.g. revert), or stored state changes explicitly. Skip highlights if fewer than two meaningful points exist.\n- text must be plain (no markdown bullets); each highlight should start with an uppercase verb\n\nDiff summary:\n${diffSummaries}`;
+ 
+      const settings = await readSettingsFromDiskMigrated();
+      const rawModel = typeof settings.commitMessageModel === 'string' ? settings.commitMessageModel.trim() : '';
+      const model = (() => {
+        if (!rawModel) return 'big-pickle';
+        const parts = rawModel.split('/').filter(Boolean);
+        const candidate = parts.length > 1 ? parts[parts.length - 1] : parts[0];
+        return candidate || 'big-pickle';
+      })();
 
       const completionTimeout = createTimeoutSignal(LONG_REQUEST_TIMEOUT_MS);
       let response;
@@ -3637,7 +3551,7 @@ async function main(options = {}) {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            model: 'big-pickle',
+            model,
             messages: [{ role: 'user', content: prompt }],
             max_tokens: 3000,
             stream: false,
@@ -4201,7 +4115,12 @@ async function main(options = {}) {
   // NOTE: This route supports background execution to avoid tying up browser connections.
   const execJobs = new Map();
   const EXEC_JOB_TTL_MS = 30 * 60 * 1000;
-  const COMMAND_TIMEOUT_MS = 60000;
+  const COMMAND_TIMEOUT_MS = (() => {
+    const raw = Number(process.env.OPENCHAMBER_FS_EXEC_TIMEOUT_MS);
+    if (Number.isFinite(raw) && raw > 0) return raw;
+    // `bun install` (common worktree setup cmd) often takes >60s.
+    return 5 * 60 * 1000;
+  })();
 
   const pruneExecJobs = () => {
     const now = Date.now();
@@ -4223,9 +4142,12 @@ async function main(options = {}) {
       let stderr = '';
       let timedOut = false;
 
+      const envPath = buildAugmentedPath();
+      const execEnv = { ...process.env, PATH: envPath };
+
       const child = spawn(shell, [shellFlag, command], {
         cwd: resolvedCwd,
-        env: process.env,
+        env: execEnv,
         stdio: ['ignore', 'pipe', 'pipe'],
       });
 
@@ -5026,9 +4948,12 @@ async function main(options = {}) {
   });
 
   if (attachSignals && !signalsAttached) {
-    process.on('SIGTERM', gracefulShutdown);
-    process.on('SIGINT', gracefulShutdown);
-    process.on('SIGQUIT', gracefulShutdown);
+    const handleSignal = async () => {
+      await gracefulShutdown();
+    };
+    process.on('SIGTERM', handleSignal);
+    process.on('SIGINT', handleSignal);
+    process.on('SIGQUIT', handleSignal);
     signalsAttached = true;
     syncToHmrState();
   }

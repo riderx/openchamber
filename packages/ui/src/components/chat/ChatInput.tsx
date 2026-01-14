@@ -19,6 +19,7 @@ import { QueuedMessageChips } from './QueuedMessageChips';
 import { FileMentionAutocomplete, type FileMentionHandle } from './FileMentionAutocomplete';
 import { CommandAutocomplete, type CommandAutocompleteHandle } from './CommandAutocomplete';
 import { AgentMentionAutocomplete, type AgentMentionAutocompleteHandle } from './AgentMentionAutocomplete';
+import { SkillAutocomplete, type SkillAutocompleteHandle } from './SkillAutocomplete';
 import { cn } from '@/lib/utils';
 import { ServerFilePicker } from './ServerFilePicker';
 import { ModelControls } from './ModelControls';
@@ -122,12 +123,15 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
     const [commandQuery, setCommandQuery] = React.useState('');
     const [showAgentAutocomplete, setShowAgentAutocomplete] = React.useState(false);
     const [agentQuery, setAgentQuery] = React.useState('');
+    const [showSkillAutocomplete, setShowSkillAutocomplete] = React.useState(false);
+    const [skillQuery, setSkillQuery] = React.useState('');
     const [textareaSize, setTextareaSize] = React.useState<{ height: number; maxHeight: number } | null>(null);
     const textareaRef = React.useRef<HTMLTextAreaElement>(null);
     const dropZoneRef = React.useRef<HTMLDivElement>(null);
     const mentionRef = React.useRef<FileMentionHandle>(null);
     const commandRef = React.useRef<CommandAutocompleteHandle>(null);
     const agentRef = React.useRef<AgentMentionAutocompleteHandle>(null);
+    const skillRef = React.useRef<SkillAutocompleteHandle>(null);
 
     const sendMessage = useSessionStore((state) => state.sendMessage);
     const currentSessionId = useSessionStore((state) => state.currentSessionId);
@@ -146,7 +150,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
     const consumePendingInputText = useSessionStore((state) => state.consumePendingInputText);
     const pendingInputText = useSessionStore((state) => state.pendingInputText);
 
-    const { currentProviderId, currentModelId, currentAgentName, setAgent, getVisibleAgents } = useConfigStore();
+    const { currentProviderId, currentModelId, currentVariant, currentAgentName, setAgent, getVisibleAgents } = useConfigStore();
     const agents = getVisibleAgents();
     const { isMobile, inputBarOffset, isKeyboardOpen, setTimelineDialogOpen } = useUIStore();
     const { working } = useAssistantStatus();
@@ -455,9 +459,27 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                 setMessage('');
                 return; // Don't send to assistant
             }
-            // Existing: /summarize command scroll
-            else if (commandName === 'summarize') {
-                scrollToBottom?.({ instant: true, force: true });
+            // /compact - call SDK summarize endpoint
+            else if (commandName === 'compact' && currentSessionId) {
+                try {
+                    const { opencodeClient } = await import('@/lib/opencode/client');
+                    const directory = opencodeClient.getDirectory();
+                    const response = await opencodeClient.getApiClient().session.summarize({
+                        sessionID: currentSessionId,
+                        directory: directory || undefined,
+                        providerID: currentProviderId,
+                        modelID: currentModelId,
+                    });
+                    if (response.error) {
+                        throw new Error('Failed to compact session');
+                    }
+                    scrollToBottom?.({ instant: true, force: true });
+                } catch (error) {
+                    console.error('Failed to compact session:', error);
+                    toast.error('Failed to compact session');
+                }
+                setMessage('');
+                return; // Don't send to assistant
             }
         }
 
@@ -474,7 +496,8 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             currentAgentName, 
             primaryAttachments, 
             agentMentionName,
-            additionalParts.length > 0 ? additionalParts : undefined
+            additionalParts.length > 0 ? additionalParts : undefined,
+            currentVariant
         ).catch((error: unknown) => {
                 const rawMessage =
                     error instanceof Error
@@ -496,6 +519,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                     normalized.includes('network error') ||
                     normalized.includes('gateway timeout') ||
                     normalized === 'failed to send message';
+
+                if (normalized.includes('payload too large') || normalized.includes('413') || normalized.includes('entity too large')) {
+                    toast.error('Attachments are too large to send. Please try reducing the number or size of images.');
+                    if (allAttachments.length > 0) {
+                        useFileStore.setState({ attachedFiles: allAttachments });
+                    }
+                    return;
+                }
 
                 if (isSoftNetworkError) {
                     return;
@@ -567,6 +598,14 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             }
         }
 
+        if (showSkillAutocomplete && skillRef.current) {
+            if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Escape' || e.key === 'Tab') {
+                e.preventDefault();
+                skillRef.current.handleKeyDown(e.key);
+                return;
+            }
+        }
+
         if (showFileMention && mentionRef.current) {
             if (e.key === 'Enter' || e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'Escape' || e.key === 'Tab') {
                 e.preventDefault();
@@ -575,7 +614,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
             }
         }
 
-        if (e.key === 'Tab' && !showCommandAutocomplete && !showFileMention) {
+        if (e.key === 'Tab' && !showCommandAutocomplete && !showAgentAutocomplete && !showFileMention) {
             e.preventDefault();
             cycleAgent();
             return;
@@ -704,10 +743,9 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                 setShowCommandAutocomplete(true);
                 setShowFileMention(false);
                 setShowAgentAutocomplete(false);
-            } else {
-                setShowCommandAutocomplete(false);
+                setShowSkillAutocomplete(false);
+                return;
             }
-            return;
         }
 
         setShowCommandAutocomplete(false);
@@ -732,6 +770,25 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
         setShowAgentAutocomplete(false);
         setAgentQuery('');
 
+        const lastSlashSymbol = textBeforeCursor.lastIndexOf('/');
+        if (lastSlashSymbol !== -1) {
+            const charBefore = lastSlashSymbol > 0 ? textBeforeCursor[lastSlashSymbol - 1] : null;
+            const textAfterSlash = textBeforeCursor.substring(lastSlashSymbol + 1);
+            const hasSeparator = textAfterSlash.includes(' ') || textAfterSlash.includes('\n');
+            const isWordBoundary = !charBefore || /\s/.test(charBefore);
+
+            if (isWordBoundary && !hasSeparator) {
+                setSkillQuery(textAfterSlash);
+                setShowSkillAutocomplete(true);
+                setShowFileMention(false);
+                setShowAgentAutocomplete(false);
+                return;
+            }
+        }
+
+        setShowSkillAutocomplete(false);
+        setSkillQuery('');
+
         const lastAtSymbol = textBeforeCursor.lastIndexOf('@');
         if (lastAtSymbol !== -1) {
             const textAfterAt = textBeforeCursor.substring(lastAtSymbol + 1);
@@ -744,7 +801,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
         } else {
             setShowFileMention(false);
         }
-    }, [setAgentQuery, setCommandQuery, setMentionQuery, setShowAgentAutocomplete, setShowCommandAutocomplete, setShowFileMention]);
+    }, [setAgentQuery, setCommandQuery, setMentionQuery, setShowAgentAutocomplete, setShowCommandAutocomplete, setShowFileMention, setShowSkillAutocomplete, setSkillQuery]);
 
     const insertTextAtSelection = React.useCallback((text: string) => {
         if (!text) {
@@ -887,6 +944,36 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
 
         setShowAgentAutocomplete(false);
         setAgentQuery('');
+
+        textareaRef.current?.focus();
+    };
+
+    const handleSkillSelect = (skillName: string) => {
+        const textarea = textareaRef.current;
+        const cursorPosition = textarea?.selectionStart ?? message.length;
+        const textBeforeCursor = message.substring(0, cursorPosition);
+        const lastSlashSymbol = textBeforeCursor.lastIndexOf('/');
+
+        if (lastSlashSymbol !== -1) {
+            const newMessage =
+                message.substring(0, lastSlashSymbol) +
+                `${skillName} ` +
+                message.substring(cursorPosition);
+            setMessage(newMessage);
+
+            const nextCursor = lastSlashSymbol + skillName.length + 1;
+            requestAnimationFrame(() => {
+                if (textareaRef.current) {
+                    textareaRef.current.selectionStart = nextCursor;
+                    textareaRef.current.selectionEnd = nextCursor;
+                }
+                adjustTextareaHeight();
+                updateAutocompleteState(newMessage, nextCursor);
+            });
+        }
+
+        setShowSkillAutocomplete(false);
+        setSkillQuery('');
 
         textareaRef.current?.focus();
     };
@@ -1264,7 +1351,10 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
 
         <form
             onSubmit={handleSubmit}
-            className="pt-0 pb-2 md:pb-4 bottom-safe-area"
+            className={cn(
+                "pt-0 pb-2 md:pb-4",
+                isMobile && isKeyboardOpen ? "ios-keyboard-safe-area" : "bottom-safe-area"
+            )}
             data-keyboard-avoid="true"
             style={isMobile && inputBarOffset > 0 && !isKeyboardOpen ? { marginBottom: `${inputBarOffset}px` } : undefined}
         >
@@ -1352,11 +1442,21 @@ export const ChatInput: React.FC<ChatInputProps> = ({ onOpenSettings, scrollToBo
                             ref={agentRef}
                             searchQuery={agentQuery}
                             onAgentSelect={handleAgentSelect}
-                            onClose={() => setShowAgentAutocomplete(false)}
-                        />
-                    )}
-                    {}
-                    {showFileMention && (
+                    onClose={() => setShowAgentAutocomplete(false)}
+                />
+            )}
+
+            {showSkillAutocomplete && (
+                <SkillAutocomplete
+                    ref={skillRef}
+                    searchQuery={skillQuery}
+                    onSkillSelect={handleSkillSelect}
+                    onClose={() => setShowSkillAutocomplete(false)}
+                />
+            )}
+
+            {showFileMention && (
+
                         <FileMentionAutocomplete
                             ref={mentionRef}
                             searchQuery={mentionQuery}

@@ -1,5 +1,6 @@
 import type { Session, Message, Part } from "@opencode-ai/sdk/v2";
 import type { PermissionRequest, PermissionResponse } from "@/types/permission";
+import type { QuestionRequest } from "@/types/question";
 
 export interface AttachedFile {
     id: string;
@@ -78,6 +79,7 @@ export interface SessionStore {
     messageStreamStates: Map<string, MessageStreamLifecycle>;
     sessionCompactionUntil: Map<string, number>;
     permissions: Map<string, PermissionRequest[]>;
+    questions: Map<string, QuestionRequest[]>;
     sessionAbortFlags: Map<string, { timestamp: number; acknowledged: boolean }>;
     attachedFiles: AttachedFile[];
     abortPromptSessionId: string | null;
@@ -131,7 +133,7 @@ export interface SessionStore {
     unshareSession: (id: string) => Promise<Session | null>;
     setCurrentSession: (id: string | null) => void;
     loadMessages: (sessionId: string) => Promise<void>;
-    sendMessage: (content: string, providerID: string, modelID: string, agent?: string, attachments?: AttachedFile[], agentMentionName?: string, additionalParts?: Array<{ text: string; attachments?: AttachedFile[] }>) => Promise<void>;
+    sendMessage: (content: string, providerID: string, modelID: string, agent?: string, attachments?: AttachedFile[], agentMentionName?: string, additionalParts?: Array<{ text: string; attachments?: AttachedFile[] }>, variant?: string) => Promise<void>;
     abortCurrentOperation: () => Promise<void>;
     acknowledgeSessionAbort: (sessionId: string) => void;
     armAbortPrompt: (durationMs?: number) => number | null;
@@ -143,6 +145,12 @@ export interface SessionStore {
     updateSessionCompaction: (sessionId: string, compactingTimestamp?: number | null) => void;
     addPermission: (permission: PermissionRequest) => void;
     respondToPermission: (sessionId: string, requestId: string, response: PermissionResponse) => Promise<void>;
+
+    addQuestion: (question: QuestionRequest) => void;
+    dismissQuestion: (sessionId: string, requestId: string) => void;
+    respondToQuestion: (sessionId: string, requestId: string, answers: string[] | string[][]) => Promise<void>;
+    rejectQuestion: (sessionId: string, requestId: string) => Promise<void>;
+
     clearError: () => void;
     getSessionsByDirectory: (directory: string) => Session[];
     getDirectoryForSession: (sessionId: string) => string | null;
@@ -172,7 +180,11 @@ export interface SessionStore {
     saveAgentModelForSession: (sessionId: string, agentName: string, providerId: string, modelId: string) => void;
     getAgentModelForSession: (sessionId: string, agentName: string) => { providerId: string; modelId: string } | null;
 
+    saveAgentModelVariantForSession: (sessionId: string, agentName: string, providerId: string, modelId: string, variant: string | undefined) => void;
+    getAgentModelVariantForSession: (sessionId: string, agentName: string, providerId: string, modelId: string) => string | undefined;
+ 
     analyzeAndSaveExternalSessionChoices: (sessionId: string, agents: Array<{ name: string; [key: string]: unknown }>) => Promise<Map<string, { providerId: string; modelId: string; timestamp: number }>>;
+
 
     isOpenChamberCreatedSession: (sessionId: string) => boolean;
 

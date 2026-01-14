@@ -3,7 +3,9 @@ import { OpenChamberVisualSettings } from './OpenChamberVisualSettings';
 import { AboutSettings } from './AboutSettings';
 import { SessionRetentionSettings } from './SessionRetentionSettings';
 import { DefaultsSettings } from './DefaultsSettings';
+import { GitSettings } from './GitSettings';
 import { WorktreeSectionContent } from './WorktreeSectionContent';
+import { NotificationSettings } from './NotificationSettings';
 import { ScrollableOverlay } from '@/components/ui/ScrollableOverlay';
 import { useDeviceInfo } from '@/lib/device';
 import { isWebRuntime } from '@/lib/desktop';
@@ -51,8 +53,10 @@ export const OpenChamberPage: React.FC<OpenChamberPageProps> = ({ section }) => 
                 return <ChatSectionContent />;
             case 'sessions':
                 return <SessionsSectionContent />;
-            case 'worktree':
-                return <WorktreeSectionContent />;
+            case 'git':
+                return <GitSectionContent />;
+            case 'notifications':
+                return <NotificationSectionContent />;
             default:
                 return null;
         }
@@ -89,4 +93,27 @@ const SessionsSectionContent: React.FC = () => {
             </div>
         </div>
     );
+};
+
+// Git section: Commit message model, Worktree settings
+const GitSectionContent: React.FC = () => {
+    return (
+        <div className="space-y-6">
+            <GitSettings />
+            <div className="border-t border-border/40 pt-6">
+                <div className="space-y-1 mb-4">
+                    <h3 className="typography-ui-header font-semibold text-foreground">Worktree</h3>
+                    <p className="typography-meta text-muted-foreground">
+                        Configure worktree branch defaults and manage existing worktrees.
+                    </p>
+                </div>
+                <WorktreeSectionContent />
+            </div>
+        </div>
+    );
+};
+
+// Notifications section: Native browser notifications
+const NotificationSectionContent: React.FC = () => {
+    return <NotificationSettings />;
 };
