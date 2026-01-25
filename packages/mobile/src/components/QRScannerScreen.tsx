@@ -49,12 +49,16 @@ export const QRScannerScreen: React.FC<QRScannerScreenProps> = ({ onConnected })
   };
 
   const startScanning = useCallback(async () => {
+    // Prevent duplicate listener registration
     if (isScanning) return;
 
     setIsScanning(true);
     setConnectionError(null);
 
     try {
+      // Remove any existing listeners before adding new one to prevent duplicates
+      await BarcodeScanner.removeAllListeners();
+
       // Add scanner listener for barcodes
       await BarcodeScanner.addListener('barcodesScanned', async (result) => {
         // Get first barcode from results
@@ -112,8 +116,8 @@ export const QRScannerScreen: React.FC<QRScannerScreenProps> = ({ onConnected })
   };
 
   const handleRecentConnection = async (url: string, token?: string) => {
-    const fullUrl = token ? `${url}?token=${token}` : url;
-    const success = await connect(fullUrl);
+    // Pass token separately to avoid exposing it in URL logs/history
+    const success = token ? await connect(url, token) : await connect(url);
     if (success) {
       onConnected();
     }

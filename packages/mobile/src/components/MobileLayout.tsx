@@ -50,13 +50,10 @@ export const MobileLayout: React.FC<MobileLayoutProps> = ({ onDisconnect }) => {
       // Set the remote URL - this must happen before UI components load
       setRemoteUrl(currentConnection.url, currentConnection.token);
 
-      // Small delay to ensure the URL is set before components start loading
-      const timer = setTimeout(() => {
-        setIsReady(true);
-      }, 100);
+      // Mark layout as ready immediately after setting the remote URL
+      setIsReady(true);
 
       return () => {
-        clearTimeout(timer);
         clearRemoteUrl();
       };
     }
@@ -82,16 +79,39 @@ export const MobileLayout: React.FC<MobileLayoutProps> = ({ onDisconnect }) => {
     };
     setupKeyboard();
 
-    // Handle back button on Android
-    const backButtonListener = CapApp.addListener('backButton', ({ canGoBack }) => {
-      if (!canGoBack) {
-        // Show disconnect confirmation or go to scanner
-        onDisconnect();
+    // Handle back button on Android with proper cleanup
+    let isActive = true;
+    let backButtonListener: { remove: () => void } | undefined;
+
+    const setupBackButton = async () => {
+      try {
+        const listener = await CapApp.addListener('backButton', ({ canGoBack }) => {
+          if (!canGoBack) {
+            // Show disconnect confirmation or go to scanner
+            onDisconnect();
+          }
+        });
+
+        if (!isActive) {
+          // Effect has already been cleaned up; remove listener immediately
+          listener.remove();
+          return;
+        }
+
+        backButtonListener = listener;
+      } catch {
+        // App plugin might not be available or listener registration failed
       }
-    });
+    };
+
+    setupBackButton();
 
     return () => {
-      backButtonListener.then(listener => listener.remove());
+      isActive = false;
+      if (backButtonListener) {
+        backButtonListener.remove();
+        backButtonListener = undefined;
+      }
     };
   }, [onDisconnect]);
 
